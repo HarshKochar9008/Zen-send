@@ -8,8 +8,6 @@ import '../identity/identity_service.dart';
 import '../transfer/transfer_service.dart';
 import 'save_file.dart';
 
-// ── Main screen ──────────────────────────────────────────────────────────────
-
 class ReceiveScreen extends StatefulWidget {
   final UserIdentity identity;
   const ReceiveScreen({super.key, required this.identity});
@@ -53,7 +51,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
             SnackBar(
               content: Text(msg),
               behavior: SnackBarBehavior.floating,
-              backgroundColor: AppColors.primary,
+              backgroundColor: AppColors.surfaceContainerHigh,
               duration: const Duration(seconds: 3),
             ),
           );
@@ -123,51 +121,73 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Incoming Files'),
-        backgroundColor: Colors.transparent,
-        elevation: 0,
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh_rounded),
+            icon: Icon(Icons.refresh_rounded,
+                color: AppColors.onSurfaceVariant.withValues(alpha: 0.5)),
             onPressed: _loadTransfers,
           ),
         ],
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? Center(
+              child: SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppColors.primary.withValues(alpha: 0.6),
+                ),
+              ),
+            )
           : _error != null
               ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        _error!,
-                        style: const TextStyle(color: Colors.white54),
-                      ),
-                      const SizedBox(height: 12),
-                      FilledButton(
-                        onPressed: _loadTransfers,
-                        child: const Text('Retry'),
-                      ),
-                    ],
+                  child: Padding(
+                    padding: const EdgeInsets.all(48),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _error!,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: AppColors.onSurfaceVariant,
+                            fontSize: 14,
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        FilledButton(
+                          onPressed: _loadTransfers,
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
                   ),
                 )
               : _transfers == null || _transfers!.isEmpty
                   ? _buildEmptyState()
                   : RefreshIndicator(
                       onRefresh: _loadTransfers,
+                      color: AppColors.primary,
                       child: ListView.separated(
-                        padding: const EdgeInsets.all(20),
+                        padding: const EdgeInsets.all(24),
                         itemCount: _transfers!.length + (_hasMore ? 1 : 0),
                         separatorBuilder: (_, __) =>
-                            const SizedBox(height: 12),
+                            const SizedBox(height: 10),
                         itemBuilder: (context, index) {
                           if (index == _transfers!.length) {
                             _loadMore();
-                            return const Center(
+                            return Center(
                               child: Padding(
-                                padding: EdgeInsets.all(16),
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2),
+                                padding: const EdgeInsets.all(16),
+                                child: SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: AppColors.primary.withValues(alpha: 0.5),
+                                  ),
+                                ),
                               ),
                             );
                           }
@@ -209,36 +229,54 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.inbox_rounded, size: 64, color: Colors.white12),
-          const SizedBox(height: 16),
+          Icon(Icons.inbox_rounded,
+              size: 48,
+              color: AppColors.onSurfaceVariant.withValues(alpha: 0.15)),
+          const SizedBox(height: 20),
           const Text(
             'No files received yet',
-            style: TextStyle(color: Colors.white38),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            'Share your code so others can send you files',
-            style: TextStyle(color: Colors.white24, fontSize: 12),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            _channel != null
-                ? 'Real-time updates active'
-                : 'Pull down to refresh',
             style: TextStyle(
-              color: _channel != null
-                  ? AppColors.success
-                  : Colors.white24,
-              fontSize: 11,
+              color: AppColors.onSurfaceVariant,
+              fontSize: 16,
+              fontWeight: FontWeight.w500,
             ),
           ),
+          const SizedBox(height: 6),
+          Text(
+            'Share your code so others can send you files',
+            style: TextStyle(
+              color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+              fontSize: 13,
+            ),
+          ),
+          const SizedBox(height: 6),
+          if (_channel != null)
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 4,
+                  height: 4,
+                  decoration: const BoxDecoration(
+                    color: AppColors.success,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  'Real-time updates active',
+                  style: TextStyle(
+                    color: AppColors.success.withValues(alpha: 0.7),
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
         ],
       ),
     );
   }
 }
-
-// ── Transfer card ────────────────────────────────────────────────────────────
 
 class _TransferCard extends StatelessWidget {
   final String senderCode;
@@ -265,11 +303,11 @@ class _TransferCard extends StatelessWidget {
       case 'partial':
         return AppColors.error;
       case 'expired':
-        return Colors.white24;
+        return AppColors.outlineVariant;
       case 'failed':
-        return Colors.redAccent;
+        return AppColors.error;
       default:
-        return Colors.white38;
+        return AppColors.outlineVariant;
     }
   }
 
@@ -278,36 +316,33 @@ class _TransferCard extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Opacity(
-        opacity: isExpired ? 0.5 : 1.0,
+        opacity: isExpired ? 0.45 : 1.0,
         child: Container(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(20),
           decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(16),
-            border:
-                Border.all(color: Colors.white.withValues(alpha: 0.06)),
+            color: AppColors.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(14),
           ),
           child: Row(
             children: [
               Container(
-                width: 46,
-                height: 46,
+                width: 40,
+                height: 40,
                 decoration: BoxDecoration(
-                  color:
-                      AppColors.primaryDark.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
+                  color: AppColors.primaryContainer.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
                 ),
                 child: Icon(
                   isExpired
                       ? Icons.timer_off_rounded
                       : Icons.person_rounded,
                   color: isExpired
-                      ? Colors.white24
-                      : AppColors.primaryDark,
-                  size: 22,
+                      ? AppColors.outlineVariant
+                      : AppColors.primaryContainer,
+                  size: 20,
                 ),
               ),
-              const SizedBox(width: 14),
+              const SizedBox(width: 16),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -316,15 +351,17 @@ class _TransferCard extends StatelessWidget {
                       'From $senderCode',
                       style: const TextStyle(
                         fontWeight: FontWeight.w600,
-                        fontSize: 15,
+                        fontSize: 14,
+                        color: AppColors.onSurface,
+                        letterSpacing: -0.2,
                       ),
                     ),
-                    const SizedBox(height: 2),
+                    const SizedBox(height: 4),
                     Row(
                       children: [
                         Container(
-                          width: 8,
-                          height: 8,
+                          width: 4,
+                          height: 4,
                           decoration: BoxDecoration(
                             color: _statusColor(),
                             shape: BoxShape.circle,
@@ -333,17 +370,17 @@ class _TransferCard extends StatelessWidget {
                         const SizedBox(width: 6),
                         Text(
                           isExpired ? 'Expired' : status,
-                          style: const TextStyle(
-                            color: Colors.white54,
-                            fontSize: 12,
+                          style: TextStyle(
+                            color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
+                            fontSize: 11,
                           ),
                         ),
                         const SizedBox(width: 8),
                         Text(
                           timeAgo,
-                          style: const TextStyle(
-                            color: Colors.white24,
-                            fontSize: 12,
+                          style: TextStyle(
+                            color: AppColors.onSurfaceVariant.withValues(alpha: 0.3),
+                            fontSize: 11,
                           ),
                         ),
                       ],
@@ -352,11 +389,9 @@ class _TransferCard extends StatelessWidget {
                 ),
               ),
               if (!isExpired)
-                const Icon(
-                  Icons.chevron_right_rounded,
-                  color: Colors.white24,
-                  size: 22,
-                ),
+                Icon(Icons.chevron_right_rounded,
+                    color: AppColors.outlineVariant.withValues(alpha: 0.5),
+                    size: 20),
             ],
           ),
         ),
@@ -364,8 +399,6 @@ class _TransferCard extends StatelessWidget {
     );
   }
 }
-
-// ── Transfer detail screen ───────────────────────────────────────────────────
 
 enum _DownloadStatus {
   idle,
@@ -483,7 +516,6 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
     final fileName = file['file_name'] as String;
     final expectedHash = file['sha256_hash'] as String?;
 
-    // Persistent duplicate delivery prevention
     if (_persistedDownloads.contains(fileId)) return;
     final existingState = _dlStates[fileId];
     if (existingState?.status == _DownloadStatus.completed) return;
@@ -506,7 +538,6 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
         },
       );
 
-      // ── Verify SHA-256 ───────────────────────────────────────────────
       if (mounted) {
         setState(() => _dlStates[fileId] = const _FileDownloadState(
               status: _DownloadStatus.verifying,
@@ -524,8 +555,7 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
           if (mounted) {
             setState(() => _dlStates[fileId] = const _FileDownloadState(
                   status: _DownloadStatus.failed,
-                  error:
-                      'Integrity check failed — file may be corrupted',
+                  error: 'Integrity check failed — file may be corrupted',
                   hashVerified: false,
                 ));
           }
@@ -533,7 +563,6 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
         }
       }
 
-      // ── Save to device ───────────────────────────────────────────────
       if (mounted) {
         setState(() => _dlStates[fileId] = _FileDownloadState(
               status: _DownloadStatus.saving,
@@ -544,7 +573,6 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
 
       final location = await saveFileToDevice(downloadedFile, fileName);
 
-      // Persist download completion across app restarts
       await _markDownloaded(fileId);
 
       if (mounted) {
@@ -563,7 +591,7 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
             ),
             duration: const Duration(seconds: 4),
             behavior: SnackBarBehavior.floating,
-            backgroundColor: AppColors.success,
+            backgroundColor: AppColors.surfaceContainerHigh,
           ),
         );
       }
@@ -606,32 +634,42 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text('From ${widget.senderCode}'),
-        backgroundColor: Colors.transparent,
-        elevation: 0,
         actions: [
           if (_files != null && _files!.isNotEmpty && !allCompleted)
             TextButton.icon(
               onPressed: _downloadAll,
-              icon: const Icon(Icons.download_rounded, size: 18),
+              icon: const Icon(Icons.download_rounded, size: 16),
               label: const Text('All'),
             ),
         ],
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? Center(
+              child: SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppColors.primary.withValues(alpha: 0.6),
+                ),
+              ),
+            )
           : _loadError != null
               ? Center(
                   child: Padding(
-                    padding: const EdgeInsets.all(32),
+                    padding: const EdgeInsets.all(48),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
                           _loadError!,
                           textAlign: TextAlign.center,
-                          style: const TextStyle(color: Colors.white54),
+                          style: const TextStyle(
+                            color: AppColors.onSurfaceVariant,
+                            fontSize: 14,
+                          ),
                         ),
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 20),
                         FilledButton(
                           onPressed: _loadFiles,
                           child: const Text('Retry'),
@@ -641,17 +679,20 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
                   ),
                 )
               : _files == null || _files!.isEmpty
-                  ? const Center(
+                  ? Center(
                       child: Text(
                         'No files in this transfer',
-                        style: TextStyle(color: Colors.white38),
+                        style: TextStyle(
+                          color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
+                          fontSize: 14,
+                        ),
                       ),
                     )
                   : ListView.separated(
-                      padding: const EdgeInsets.all(20),
+                      padding: const EdgeInsets.all(24),
                       itemCount: _files!.length,
                       separatorBuilder: (_, __) =>
-                          const SizedBox(height: 10),
+                          const SizedBox(height: 8),
                       itemBuilder: (context, index) {
                         final file = _files![index];
                         final fileId = file['id'] as String;
@@ -668,8 +709,6 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
     );
   }
 }
-
-// ── File download tile ───────────────────────────────────────────────────────
 
 class _FileDownloadTile extends StatelessWidget {
   final String fileName;
@@ -689,9 +728,9 @@ class _FileDownloadTile extends StatelessWidget {
     final status = state?.status ?? _DownloadStatus.idle;
 
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: AppColors.surfaceContainer,
         borderRadius: BorderRadius.circular(14),
       ),
       child: Column(
@@ -699,11 +738,7 @@ class _FileDownloadTile extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(
-                _fileIcon(status),
-                color: _iconColor(status),
-                size: 24,
-              ),
+              Icon(_fileIcon(status), color: _iconColor(status), size: 20),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -713,13 +748,16 @@ class _FileDownloadTile extends StatelessWidget {
                       fileName,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 14),
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: AppColors.onSurface,
+                      ),
                     ),
                     Text(
                       fileSize,
-                      style: const TextStyle(
-                        color: Colors.white38,
-                        fontSize: 12,
+                      style: TextStyle(
+                        color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                        fontSize: 11,
                       ),
                     ),
                   ],
@@ -730,82 +768,76 @@ class _FileDownloadTile extends StatelessWidget {
             ],
           ),
 
-          // ── Progress bar ───────────────────────────────────────────
           if (status == _DownloadStatus.downloading) ...[
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
             ClipRRect(
               borderRadius: BorderRadius.circular(3),
               child: LinearProgressIndicator(
                 value: state!.progress,
-                backgroundColor: Colors.white12,
-                valueColor: const AlwaysStoppedAnimation(
-                  AppColors.primaryDark,
-                ),
-                minHeight: 4,
+                backgroundColor: AppColors.outlineVariant.withValues(alpha: 0.15),
+                valueColor:
+                    const AlwaysStoppedAnimation(AppColors.primary),
+                minHeight: 3,
               ),
             ),
             const SizedBox(height: 4),
             Text(
               'Downloading… ${(state!.progress * 100).toInt()}%',
-              style: const TextStyle(
-                color: Colors.white38,
+              style: TextStyle(
+                color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
                 fontSize: 11,
               ),
             ),
           ],
 
           if (status == _DownloadStatus.verifying) ...[
-            const SizedBox(height: 6),
-            const Text(
-              'Verifying file integrity (SHA-256)…',
+            const SizedBox(height: 8),
+            Text(
+              'Verifying integrity…',
               style: TextStyle(
-                color: AppColors.primaryDark,
+                color: AppColors.primary.withValues(alpha: 0.6),
                 fontSize: 11,
               ),
             ),
           ],
 
           if (status == _DownloadStatus.saving) ...[
-            const SizedBox(height: 6),
-            const Text(
+            const SizedBox(height: 8),
+            Text(
               'Saving to device…',
               style: TextStyle(
-                color: AppColors.warning,
+                color: AppColors.warning.withValues(alpha: 0.7),
                 fontSize: 11,
               ),
             ),
           ],
 
-          // ── Completed info ─────────────────────────────────────────
           if (status == _DownloadStatus.completed) ...[
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
             Row(
               children: [
                 if (state?.hashVerified == true) ...[
-                  const Icon(
-                    Icons.verified_rounded,
-                    color: AppColors.success,
-                    size: 14,
-                  ),
+                  Icon(Icons.verified_rounded,
+                      color: AppColors.success.withValues(alpha: 0.7), size: 12),
                   const SizedBox(width: 4),
-                  const Text(
+                  Text(
                     'SHA-256 verified',
                     style: TextStyle(
-                      color: AppColors.success,
+                      color: AppColors.success.withValues(alpha: 0.7),
                       fontSize: 11,
                     ),
                   ),
                 ] else ...[
-                  const Icon(
-                    Icons.check_circle_outline,
-                    color: Colors.white38,
-                    size: 14,
-                  ),
+                  Icon(Icons.check_circle_outline,
+                      color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                      size: 12),
                   const SizedBox(width: 4),
-                  const Text(
+                  Text(
                     'Saved',
-                    style:
-                        TextStyle(color: Colors.white38, fontSize: 11),
+                    style: TextStyle(
+                      color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                      fontSize: 11,
+                    ),
                   ),
                 ],
               ],
@@ -816,24 +848,20 @@ class _FileDownloadTile extends StatelessWidget {
                 state!.savedLocation!,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Colors.white24,
+                style: TextStyle(
+                  color: AppColors.outlineVariant.withValues(alpha: 0.5),
                   fontSize: 10,
                 ),
               ),
             ],
           ],
 
-          // ── Error ──────────────────────────────────────────────────
           if (status == _DownloadStatus.failed &&
               state?.error != null) ...[
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
             Text(
               state!.error!,
-              style: const TextStyle(
-                color: Colors.redAccent,
-                fontSize: 11,
-              ),
+              style: const TextStyle(color: AppColors.error, fontSize: 11),
             ),
           ],
         ],
@@ -857,9 +885,9 @@ class _FileDownloadTile extends StatelessWidget {
       case _DownloadStatus.completed:
         return AppColors.success;
       case _DownloadStatus.failed:
-        return Colors.redAccent;
+        return AppColors.error;
       default:
-        return AppColors.primaryDark;
+        return AppColors.primary.withValues(alpha: 0.6);
     }
   }
 
@@ -869,25 +897,23 @@ class _FileDownloadTile extends StatelessWidget {
       case _DownloadStatus.failed:
         return IconButton(
           onPressed: onDownload,
-          icon: const Icon(
-            Icons.download_rounded,
-            color: AppColors.primaryDark,
-          ),
+          icon: const Icon(Icons.download_rounded,
+              color: AppColors.primary, size: 20),
         );
       case _DownloadStatus.downloading:
       case _DownloadStatus.verifying:
       case _DownloadStatus.saving:
-        return const SizedBox(
-          width: 24,
-          height: 24,
-          child: CircularProgressIndicator(strokeWidth: 2),
+        return SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: AppColors.primary.withValues(alpha: 0.6),
+          ),
         );
       case _DownloadStatus.completed:
-        return const Icon(
-          Icons.check_rounded,
-          color: AppColors.success,
-          size: 22,
-        );
+        return Icon(Icons.check_rounded,
+            color: AppColors.success.withValues(alpha: 0.7), size: 20);
     }
   }
 }

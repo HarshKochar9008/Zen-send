@@ -452,13 +452,14 @@ class TransferService {
   }
 
   /// Insert a transfer_files row.
-  /// Only falls back without sha256_hash on PostgreSQL 42703 (undefined_column),
-  /// which means the column doesn't exist in the schema yet.
+  /// Falls back without sha256_hash when the column doesn't exist:
+  ///   - 42703: PostgreSQL undefined_column
+  ///   - PGRST204: PostgREST column not found in schema cache
   static Future<void> _insertTransferFile(Map<String, dynamic> data) async {
     try {
       await SupabaseConfig.client.from('transfer_files').insert(data);
     } on PostgrestException catch (e) {
-      if (e.code == '42703') {
+      if (e.code == '42703' || e.code == 'PGRST204') {
         final fallback = Map<String, dynamic>.from(data)
           ..remove('sha256_hash');
         await SupabaseConfig.client.from('transfer_files').insert(fallback);

@@ -31,7 +31,7 @@ dependencies:
   crypto: ^3.0.3
 
   # Network connectivity detection
-  connectivity_plus: ^6.1.4
+  connectivity_plus: ^7.1.1
 
   cupertino_icons: ^1.0.6
 

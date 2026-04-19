@@ -52,9 +52,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           _isOnline = !result.contains(ConnectivityResult.none);
         });
       }
-    } catch (_) {
-      // Connectivity check failed, assume online
-    }
+    } catch (_) {}
   }
 
   Future<void> _loadIdentity() async {
@@ -96,19 +94,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (mounted) {
         setState(() => _sentHistory = history);
       }
-    } catch (_) {
-      // Non-critical — silently ignore
-    }
+    } catch (_) {}
   }
 
   void _copyCode() {
     if (_identity == null) return;
     Clipboard.setData(ClipboardData(text: _identity!.shortCode));
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Code copied to clipboard'),
-        duration: Duration(seconds: 2),
+      SnackBar(
+        content: const Text('Code copied'),
+        duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
+        backgroundColor: AppColors.surfaceContainerHigh,
       ),
     );
   }
@@ -132,27 +129,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 }
 
-// ── Loading ─────────────────────────────────────────────────────────────────
-
 class _LoadingView extends StatelessWidget {
   const _LoadingView();
 
   @override
   Widget build(BuildContext context) {
-    return const Center(
+    return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          CircularProgressIndicator(),
-          SizedBox(height: 16),
-          Text('Setting up your identity...'),
+          SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: AppColors.primary.withValues(alpha: 0.6),
+            ),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'Setting up...',
+            style: TextStyle(
+              color: AppColors.onSurfaceVariant,
+              fontSize: 14,
+              letterSpacing: -0.02,
+            ),
+          ),
         ],
       ),
     );
   }
 }
-
-// ── Error ────────────────────────────────────────────────────────────────────
 
 class _ErrorView extends StatelessWidget {
   final String message;
@@ -164,14 +171,22 @@ class _ErrorView extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.all(48),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.wifi_off_rounded, size: 64, color: Colors.red),
-            const SizedBox(height: 16),
-            Text(message, textAlign: TextAlign.center),
+            Icon(Icons.wifi_off_rounded,
+                size: 48, color: AppColors.onSurfaceVariant.withValues(alpha: 0.3)),
             const SizedBox(height: 24),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: AppColors.onSurfaceVariant,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(height: 32),
             FilledButton(onPressed: onRetry, child: const Text('Retry')),
           ],
         ),
@@ -179,8 +194,6 @@ class _ErrorView extends StatelessWidget {
     );
   }
 }
-
-// ── Main body ────────────────────────────────────────────────────────────────
 
 class _HomeBody extends StatelessWidget {
   final UserIdentity identity;
@@ -197,100 +210,80 @@ class _HomeBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Header ──────────────────────────────────────────────
+          // ── Header
           Row(
             children: [
               ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: Image.asset(
-                  'assets/logo.png',
-                  width: 36,
-                  height: 36,
-                ),
+                borderRadius: BorderRadius.circular(8),
+                child: Image.asset('assets/logo.png', width: 28, height: 28),
               ),
               const SizedBox(width: 10),
-              Text('ZenShare',
-                  style: theme.textTheme.titleLarge
-                      ?.copyWith(fontWeight: FontWeight.w600)),
-              const Spacer(),
-              // Connectivity indicator
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isOnline
-                      ? AppColors.success.withValues(alpha: 0.15)
-                      : Colors.red.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(8),
+              const Text(
+                'ZenSend',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.onSurface,
+                  letterSpacing: -0.4,
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        color: isOnline
-                            ? AppColors.success
-                            : Colors.redAccent,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      isOnline ? 'Online' : 'Offline',
-                      style: TextStyle(
-                        color: isOnline
-                            ? AppColors.success
-                            : Colors.redAccent,
-                        fontSize: 10,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
+              ),
+              const Spacer(),
+              Container(
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  color: isOnline ? AppColors.success : AppColors.error,
+                  shape: BoxShape.circle,
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 24),
 
-          // ── Your code card ───────────────────────────────────────
+          const SizedBox(height: 36),
+
+          // ── Share code card
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(28),
             decoration: BoxDecoration(
               gradient: const LinearGradient(
-                colors: [AppColors.primary, AppColors.primaryDark],
+                colors: [
+                  Color(0xFF1E2A3E),
+                  Color(0xFF172030),
+                ],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               ),
-              borderRadius: BorderRadius.circular(20),
+              borderRadius: BorderRadius.circular(16),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Your share code',
-                    style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 13,
-                        letterSpacing: 0.5)),
-                const SizedBox(height: 8),
+                Text(
+                  'Your share code',
+                  style: TextStyle(
+                    color: AppColors.onSurfaceVariant.withValues(alpha: 0.6),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                const SizedBox(height: 16),
                 Row(
                   children: [
                     Text(
                       identity.shortCode,
                       style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 40,
+                        color: AppColors.onSurface,
+                        fontSize: 36,
                         fontWeight: FontWeight.w700,
-                        letterSpacing: 6,
+                        letterSpacing: 8,
+                        fontFamily: 'monospace',
                       ),
                     ),
                     const Spacer(),
@@ -299,73 +292,69 @@ class _HomeBody extends StatelessWidget {
                       child: Container(
                         padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.15),
+                          color: Colors.white.withValues(alpha: 0.08),
                           borderRadius: BorderRadius.circular(10),
                         ),
-                        child: const Icon(Icons.copy_rounded,
-                            color: Colors.white, size: 20),
+                        child: Icon(Icons.copy_rounded,
+                            color: AppColors.primary.withValues(alpha: 0.7),
+                            size: 18),
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                const Text('Share this code so others can send you files',
-                    style: TextStyle(color: Colors.white60, fontSize: 12)),
+                const SizedBox(height: 12),
+                Text(
+                  'Share this code so others can send you files',
+                  style: TextStyle(
+                    color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                    fontSize: 12,
+                  ),
+                ),
               ],
             ),
           ),
-          const SizedBox(height: 28),
 
-          // ── Action buttons ───────────────────────────────────────
-          const Text('ACTIONS',
-              style: TextStyle(
-                  color: Colors.white38,
-                  fontSize: 11,
-                  letterSpacing: 1.5,
-                  fontWeight: FontWeight.w600)),
-          const SizedBox(height: 12),
+          const SizedBox(height: 36),
 
+          // ── Action cards
           _ActionTile(
-            icon: Icons.upload_rounded,
-            iconColor: AppColors.primary,
+            icon: Icons.arrow_upward_rounded,
             title: 'Send Files',
             subtitle: 'Enter a code and send media',
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => SendScreen(identity: identity),
-                ),
-              );
-            },
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => SendScreen(identity: identity),
+              ),
+            ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           _ActionTile(
-            icon: Icons.download_rounded,
-            iconColor: AppColors.primaryDark,
+            icon: Icons.arrow_downward_rounded,
             title: 'Incoming Files',
             subtitle: 'View files sent to your code',
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => ReceiveScreen(identity: identity),
-                ),
-              );
-            },
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ReceiveScreen(identity: identity),
+              ),
+            ),
           ),
 
-          const SizedBox(height: 24),
+          const SizedBox(height: 32),
 
-          // ── Sent history ────────────────────────────────────────
+          // ── Sent history
           if (sentHistory != null && sentHistory!.isNotEmpty) ...[
-            const Text('RECENT SENDS',
-                style: TextStyle(
-                    color: Colors.white38,
-                    fontSize: 11,
-                    letterSpacing: 1.5,
-                    fontWeight: FontWeight.w600)),
-            const SizedBox(height: 10),
+            Text(
+              'Recent',
+              style: TextStyle(
+                color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                letterSpacing: 0.5,
+              ),
+            ),
+            const SizedBox(height: 12),
             Expanded(
               child: ListView.separated(
                 itemCount: sentHistory!.length > 5 ? 5 : sentHistory!.length,
@@ -402,8 +391,6 @@ class _HomeBody extends StatelessWidget {
   }
 }
 
-// ── Sent history tile ────────────────────────────────────────────────────────
-
 class _SentHistoryTile extends StatelessWidget {
   final String receiverCode;
   final String status;
@@ -422,7 +409,7 @@ class _SentHistoryTile extends StatelessWidget {
       case 'partial':
         return AppColors.error;
       case 'failed':
-        return Colors.redAccent;
+        return AppColors.error;
       default:
         return AppColors.warning;
     }
@@ -431,50 +418,58 @@ class _SentHistoryTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: AppColors.surfaceContainer,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
         children: [
-          Icon(Icons.send_rounded, size: 16, color: _statusColor),
-          const SizedBox(width: 10),
-          Text(
-            'To $receiverCode',
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-          ),
-          const Spacer(),
           Container(
-            width: 6,
-            height: 6,
+            width: 4,
+            height: 4,
             decoration:
                 BoxDecoration(color: _statusColor, shape: BoxShape.circle),
           ),
-          const SizedBox(width: 6),
-          Text(status,
-              style: const TextStyle(color: Colors.white38, fontSize: 11)),
+          const SizedBox(width: 12),
+          Text(
+            'To $receiverCode',
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+              color: AppColors.onSurface,
+            ),
+          ),
+          const Spacer(),
+          Text(
+            status,
+            style: TextStyle(
+              color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
+              fontSize: 11,
+            ),
+          ),
           const SizedBox(width: 8),
-          Text(timeAgo,
-              style: const TextStyle(color: Colors.white24, fontSize: 11)),
+          Text(
+            timeAgo,
+            style: TextStyle(
+              color: AppColors.onSurfaceVariant.withValues(alpha: 0.3),
+              fontSize: 11,
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
-// ── Action tile ──────────────────────────────────────────────────────────────
-
 class _ActionTile extends StatelessWidget {
   final IconData icon;
-  final Color iconColor;
   final String title;
   final String subtitle;
   final VoidCallback onTap;
 
   const _ActionTile({
     required this.icon,
-    required this.iconColor,
     required this.title,
     required this.subtitle,
     required this.onTap,
@@ -485,40 +480,49 @@ class _ActionTile extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(20),
         decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          color: AppColors.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(14),
         ),
         child: Row(
           children: [
             Container(
-              width: 46,
-              height: 46,
+              width: 40,
+              height: 40,
               decoration: BoxDecoration(
-                color: iconColor.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(12),
+                color: AppColors.primary.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(10),
               ),
-              child: Icon(icon, color: iconColor, size: 22),
+              child: Icon(icon, color: AppColors.primary, size: 20),
             ),
-            const SizedBox(width: 14),
+            const SizedBox(width: 16),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title,
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w600, fontSize: 15)),
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 15,
+                      color: AppColors.onSurface,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
                   const SizedBox(height: 2),
-                  Text(subtitle,
-                      style: const TextStyle(
-                          color: Colors.white54, fontSize: 12)),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
+                      fontSize: 12,
+                    ),
+                  ),
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right_rounded,
-                color: Colors.white24, size: 22),
+            Icon(Icons.chevron_right_rounded,
+                color: AppColors.outlineVariant.withValues(alpha: 0.5), size: 20),
           ],
         ),
       ),

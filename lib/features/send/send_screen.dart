@@ -35,7 +35,7 @@ class _SendScreenState extends State<SendScreen> {
       final result = await Connectivity().checkConnectivity();
       return !result.contains(ConnectivityResult.none);
     } catch (_) {
-      return true; // Assume connected if check fails
+      return true;
     }
   }
 
@@ -121,11 +121,11 @@ class _SendScreenState extends State<SendScreen> {
         title: Row(
           children: [
             Icon(Icons.file_copy_rounded,
-                color: Colors.amber.shade400, size: 24),
+                color: AppColors.warning, size: 20),
             const SizedBox(width: 10),
             const Text(
               'Duplicate Files',
-              style: TextStyle(color: Colors.white, fontSize: 18),
+              style: TextStyle(color: AppColors.onSurface, fontSize: 16),
             ),
           ],
         ),
@@ -137,7 +137,9 @@ class _SendScreenState extends State<SendScreen> {
               fileNames.length == 1
                   ? 'This file has already been added:'
                   : 'These files have already been added:',
-              style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+              style: TextStyle(
+                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.6),
+                  fontSize: 13),
             ),
             const SizedBox(height: 12),
             ...fileNames.map(
@@ -146,13 +148,13 @@ class _SendScreenState extends State<SendScreen> {
                 child: Row(
                   children: [
                     Icon(Icons.insert_drive_file_rounded,
-                        color: Colors.grey.shade500, size: 16),
+                        color: AppColors.outlineVariant, size: 14),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         name,
                         style: const TextStyle(
-                            color: Colors.white70, fontSize: 13),
+                            color: AppColors.onSurfaceVariant, fontSize: 13),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -165,8 +167,7 @@ class _SendScreenState extends State<SendScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child:
-                Text('OK', style: TextStyle(color: Colors.amber.shade400)),
+            child: const Text('OK'),
           ),
         ],
       ),
@@ -188,7 +189,6 @@ class _SendScreenState extends State<SendScreen> {
       return;
     }
 
-    // Pre-flight connectivity check
     if (!await _hasConnectivity()) {
       setState(() => _error = 'No internet connection. Please try again.');
       return;
@@ -244,11 +244,9 @@ class _SendScreenState extends State<SendScreen> {
       if (result.success) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              '${result.completedFiles} file(s) sent to $code',
-            ),
+            content: Text('${result.completedFiles} file(s) sent to $code'),
             behavior: SnackBarBehavior.floating,
-            backgroundColor: AppColors.success,
+            backgroundColor: AppColors.surfaceContainerHigh,
           ),
         );
         Navigator.pop(context);
@@ -293,27 +291,23 @@ class _SendScreenState extends State<SendScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Send Files'),
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-      ),
+      appBar: AppBar(title: const Text('Send Files')),
       body: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Recipient code ───────────────────────────────────────
-            const Text(
+            // ── Recipient code
+            Text(
               'Recipient Code',
               style: TextStyle(
-                color: Colors.white70,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
+                color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
                 letterSpacing: 0.5,
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             TextField(
               controller: _codeController,
               enabled: !_sending,
@@ -323,39 +317,50 @@ class _SendScreenState extends State<SendScreen> {
                 fontSize: 24,
                 letterSpacing: 8,
                 fontWeight: FontWeight.w700,
+                fontFamily: 'monospace',
+                color: AppColors.onSurface,
               ),
               decoration: InputDecoration(
                 hintText: 'ABC123',
                 hintStyle: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.15),
+                  color: AppColors.outlineVariant.withValues(alpha: 0.4),
                   fontSize: 24,
                   letterSpacing: 8,
+                  fontFamily: 'monospace',
                 ),
                 counterText: '',
                 filled: true,
-                fillColor: AppColors.surface,
+                fillColor: AppColors.surfaceContainerLowest,
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide.none,
                 ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(
+                    color: AppColors.primary.withValues(alpha: 0.2),
+                  ),
+                ),
                 errorText: _codeError,
+                errorStyle: const TextStyle(fontSize: 12),
                 contentPadding: const EdgeInsets.symmetric(
                   horizontal: 20,
                   vertical: 18,
                 ),
               ),
             ),
-            const SizedBox(height: 24),
 
-            // ── Files header ─────────────────────────────────────────
+            const SizedBox(height: 28),
+
+            // ── Files header
             Row(
               children: [
-                const Text(
+                Text(
                   'Files',
                   style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
+                    color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
                     letterSpacing: 0.5,
                   ),
                 ),
@@ -363,7 +368,7 @@ class _SendScreenState extends State<SendScreen> {
                 if (!_sending)
                   TextButton.icon(
                     onPressed: _pickFiles,
-                    icon: const Icon(Icons.add_rounded, size: 18),
+                    icon: const Icon(Icons.add_rounded, size: 16),
                     label: Text(
                       _selectedFiles.isEmpty ? 'Pick Files' : 'Add More',
                     ),
@@ -372,7 +377,7 @@ class _SendScreenState extends State<SendScreen> {
             ),
             const SizedBox(height: 8),
 
-            // ── File list / progress view ────────────────────────────
+            // ── File list / progress view
             Expanded(
               child: _sending && _uploadStates != null
                   ? _UploadProgressList(states: _uploadStates!)
@@ -395,50 +400,64 @@ class _SendScreenState extends State<SendScreen> {
                         ),
             ),
 
-            // ── Error ────────────────────────────────────────────────
+            // ── Error
             if (_error != null) ...[
               const SizedBox(height: 8),
               Text(
                 _error!,
-                style: const TextStyle(
-                  color: Colors.redAccent,
-                  fontSize: 13,
-                ),
+                style: const TextStyle(color: AppColors.error, fontSize: 12),
               ),
             ],
 
             const SizedBox(height: 16),
 
-            // ── Send button ──────────────────────────────────────────
+            // ── Send button
             SizedBox(
               width: double.infinity,
-              height: 54,
-              child: FilledButton(
-                onPressed: (_sending || _validatingCode) ? null : _send,
-                style: FilledButton.styleFrom(
-                  backgroundColor: AppColors.primary,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16),
-                  ),
+              height: 52,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: (_sending || _validatingCode)
+                      ? null
+                      : const LinearGradient(
+                          colors: [AppColors.primary, AppColors.primaryContainer],
+                          begin: Alignment.centerLeft,
+                          end: Alignment.centerRight,
+                        ),
+                  color: (_sending || _validatingCode)
+                      ? AppColors.surfaceContainerHigh
+                      : null,
+                  borderRadius: BorderRadius.circular(12),
                 ),
-                child: _sending
-                    ? _buildSendingLabel()
-                    : _validatingCode
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
+                child: FilledButton(
+                  onPressed: (_sending || _validatingCode) ? null : _send,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.transparent,
+                    disabledBackgroundColor: Colors.transparent,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: _sending
+                      ? _buildSendingLabel()
+                      : _validatingCode
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: AppColors.onSurfaceVariant,
+                              ),
+                            )
+                          : const Text(
+                              'Send',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.onPrimary,
+                              ),
                             ),
-                          )
-                        : const Text(
-                            'Send',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
+                ),
               ),
             ),
           ],
@@ -451,11 +470,11 @@ class _SendScreenState extends State<SendScreen> {
     final states = _uploadStates;
     if (states == null) {
       return const SizedBox(
-        width: 20,
-        height: 20,
+        width: 18,
+        height: 18,
         child: CircularProgressIndicator(
           strokeWidth: 2,
-          color: Colors.white,
+          color: AppColors.onSurfaceVariant,
         ),
       );
     }
@@ -465,21 +484,22 @@ class _SendScreenState extends State<SendScreen> {
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         const SizedBox(
-          width: 20,
-          height: 20,
+          width: 18,
+          height: 18,
           child: CircularProgressIndicator(
             strokeWidth: 2,
-            color: Colors.white,
+            color: AppColors.onSurfaceVariant,
           ),
         ),
         const SizedBox(width: 12),
-        Text('Sending $done / ${states.length} files'),
+        Text(
+          'Sending $done / ${states.length}',
+          style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 13),
+        ),
       ],
     );
   }
 }
-
-// ── Upload progress list ─────────────────────────────────────────────────────
 
 class _UploadProgressList extends StatelessWidget {
   final List<FileUploadProgress> states;
@@ -494,27 +514,23 @@ class _UploadProgressList extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.only(bottom: 16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                '$completed / ${states.length} files uploaded',
-                style: const TextStyle(
-                  color: Colors.white54,
-                  fontSize: 13,
+                '$completed / ${states.length} uploaded',
+                style: TextStyle(
+                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
+                  fontSize: 12,
                 ),
               ),
-              const SizedBox(height: 6),
+              const SizedBox(height: 8),
               ClipRRect(
                 borderRadius: BorderRadius.circular(4),
                 child: LinearProgressIndicator(
                   value: states.isNotEmpty ? completed / states.length : 0,
-                  backgroundColor: Colors.white12,
-                  valueColor: const AlwaysStoppedAnimation(
-                    AppColors.primary,
-                  ),
-                  minHeight: 6,
+                  minHeight: 4,
                 ),
               ),
             ],
@@ -533,8 +549,6 @@ class _UploadProgressList extends StatelessWidget {
   }
 }
 
-// ── Per-file progress tile ───────────────────────────────────────────────────
-
 class _FileProgressTile extends StatelessWidget {
   final FileUploadProgress state;
   const _FileProgressTile({required this.state});
@@ -542,9 +556,9 @@ class _FileProgressTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: AppColors.surfaceContainer,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Column(
@@ -559,14 +573,15 @@ class _FileProgressTile extends StatelessWidget {
                   state.fileName,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 14),
+                  style: const TextStyle(
+                      fontSize: 13, color: AppColors.onSurface),
                 ),
               ),
               Text(
                 _statusLabel(),
                 style: TextStyle(
                   color: _statusColor(),
-                  fontSize: 12,
+                  fontSize: 11,
                   fontWeight: FontWeight.w500,
                 ),
               ),
@@ -574,23 +589,26 @@ class _FileProgressTile extends StatelessWidget {
           ),
           if (state.status == FileUploadStatus.hashing ||
               state.status == FileUploadStatus.uploading) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             ClipRRect(
               borderRadius: BorderRadius.circular(3),
               child: LinearProgressIndicator(
                 value: state.progress,
-                backgroundColor: Colors.white12,
+                backgroundColor: AppColors.outlineVariant.withValues(alpha: 0.15),
                 valueColor: AlwaysStoppedAnimation(_statusColor()),
-                minHeight: 4,
+                minHeight: 3,
               ),
             ),
             const SizedBox(height: 4),
             Text(
               state.status == FileUploadStatus.hashing
-                  ? 'Verifying integrity… ${(state.progress * 100).toInt()}%'
+                  ? 'Verifying… ${(state.progress * 100).toInt()}%'
                   : 'Uploading… ${(state.progress * 100).toInt()}%'
                       '${state.attempt > 1 ? ' (retry ${state.attempt})' : ''}',
-              style: const TextStyle(color: Colors.white38, fontSize: 11),
+              style: TextStyle(
+                color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                fontSize: 11,
+              ),
             ),
           ],
           if (state.status == FileUploadStatus.completed &&
@@ -598,8 +616,8 @@ class _FileProgressTile extends StatelessWidget {
             const SizedBox(height: 4),
             Text(
               'SHA-256: ${state.sha256!.substring(0, 16)}…',
-              style: const TextStyle(
-                color: Colors.white24,
+              style: TextStyle(
+                color: AppColors.outlineVariant.withValues(alpha: 0.5),
                 fontSize: 10,
                 fontFamily: 'monospace',
               ),
@@ -610,10 +628,7 @@ class _FileProgressTile extends StatelessWidget {
             const SizedBox(height: 4),
             Text(
               state.error!,
-              style: const TextStyle(
-                color: Colors.redAccent,
-                fontSize: 11,
-              ),
+              style: const TextStyle(color: AppColors.error, fontSize: 11),
             ),
           ],
         ],
@@ -624,31 +639,23 @@ class _FileProgressTile extends StatelessWidget {
   Widget _statusIcon() {
     switch (state.status) {
       case FileUploadStatus.pending:
-        return const Icon(Icons.schedule, color: Colors.white24, size: 20);
+        return Icon(Icons.schedule,
+            color: AppColors.outlineVariant.withValues(alpha: 0.5), size: 18);
       case FileUploadStatus.hashing:
         return const SizedBox(
-          width: 20,
-          height: 20,
+          width: 18,
+          height: 18,
           child: CircularProgressIndicator(strokeWidth: 2),
         );
       case FileUploadStatus.uploading:
-        return const Icon(
-          Icons.cloud_upload_rounded,
-          color: AppColors.primary,
-          size: 20,
-        );
+        return const Icon(Icons.cloud_upload_rounded,
+            color: AppColors.primary, size: 18);
       case FileUploadStatus.completed:
-        return const Icon(
-          Icons.check_circle_rounded,
-          color: AppColors.success,
-          size: 20,
-        );
+        return const Icon(Icons.check_circle_rounded,
+            color: AppColors.success, size: 18);
       case FileUploadStatus.failed:
-        return const Icon(
-          Icons.error_rounded,
-          color: Colors.redAccent,
-          size: 20,
-        );
+        return const Icon(Icons.error_rounded,
+            color: AppColors.error, size: 18);
     }
   }
 
@@ -670,20 +677,18 @@ class _FileProgressTile extends StatelessWidget {
   Color _statusColor() {
     switch (state.status) {
       case FileUploadStatus.pending:
-        return Colors.white24;
+        return AppColors.outlineVariant;
       case FileUploadStatus.hashing:
-        return AppColors.primaryDark;
+        return AppColors.primaryContainer;
       case FileUploadStatus.uploading:
         return AppColors.primary;
       case FileUploadStatus.completed:
         return AppColors.success;
       case FileUploadStatus.failed:
-        return Colors.redAccent;
+        return AppColors.error;
     }
   }
 }
-
-// ── Empty state ──────────────────────────────────────────────────────────────
 
 class _EmptyFilesView extends StatelessWidget {
   final VoidCallback onPick;
@@ -695,31 +700,34 @@ class _EmptyFilesView extends StatelessWidget {
       onTap: onPick,
       child: Container(
         decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(16),
+          color: AppColors.surfaceContainerLowest,
+          borderRadius: BorderRadius.circular(14),
           border: Border.all(
-            color: Colors.white.withValues(alpha: 0.06),
-            width: 1.5,
+            color: AppColors.outlineVariant.withValues(alpha: 0.15),
           ),
         ),
-        child: const Center(
+        child: Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                Icons.cloud_upload_outlined,
-                size: 48,
-                color: Colors.white24,
-              ),
-              SizedBox(height: 12),
+              Icon(Icons.cloud_upload_outlined,
+                  size: 40,
+                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.2)),
+              const SizedBox(height: 16),
               Text(
                 'Tap to select files',
-                style: TextStyle(color: Colors.white38, fontSize: 14),
+                style: TextStyle(
+                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                  fontSize: 14,
+                ),
               ),
-              SizedBox(height: 4),
+              const SizedBox(height: 4),
               Text(
                 'Images, videos, documents — any file type',
-                style: TextStyle(color: Colors.white24, fontSize: 11),
+                style: TextStyle(
+                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.25),
+                  fontSize: 11,
+                ),
               ),
             ],
           ),
@@ -728,8 +736,6 @@ class _EmptyFilesView extends StatelessWidget {
     );
   }
 }
-
-// ── File tile (pre-send) ─────────────────────────────────────────────────────
 
 class _FileTile extends StatelessWidget {
   final String name;
@@ -741,18 +747,15 @@ class _FileTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: AppColors.surfaceContainer,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
         children: [
-          const Icon(
-            Icons.insert_drive_file_rounded,
-            color: AppColors.primary,
-            size: 22,
-          ),
+          Icon(Icons.insert_drive_file_rounded,
+              color: AppColors.primary.withValues(alpha: 0.6), size: 20),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -762,13 +765,14 @@ class _FileTile extends StatelessWidget {
                   name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 14),
+                  style: const TextStyle(
+                      fontSize: 13, color: AppColors.onSurface),
                 ),
                 Text(
                   size,
-                  style: const TextStyle(
-                    color: Colors.white38,
-                    fontSize: 12,
+                  style: TextStyle(
+                    color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                    fontSize: 11,
                   ),
                 ),
               ],
@@ -777,11 +781,9 @@ class _FileTile extends StatelessWidget {
           if (onRemove != null)
             GestureDetector(
               onTap: onRemove,
-              child: const Icon(
-                Icons.close_rounded,
-                color: Colors.white24,
-                size: 20,
-              ),
+              child: Icon(Icons.close_rounded,
+                  color: AppColors.outlineVariant.withValues(alpha: 0.5),
+                  size: 18),
             ),
         ],
       ),
