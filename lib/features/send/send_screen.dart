@@ -1,7 +1,9 @@
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 
 import '../../core/constants.dart';
+import '../../core/theme.dart';
 import '../identity/identity_service.dart';
 import '../transfer/transfer_service.dart';
 
@@ -28,6 +30,15 @@ class _SendScreenState extends State<SendScreen> {
     super.dispose();
   }
 
+  Future<bool> _hasConnectivity() async {
+    try {
+      final result = await Connectivity().checkConnectivity();
+      return !result.contains(ConnectivityResult.none);
+    } catch (_) {
+      return true; // Assume connected if check fails
+    }
+  }
+
   Future<void> _pickFiles() async {
     try {
       final result = await FilePicker.pickFiles(
@@ -37,8 +48,13 @@ class _SendScreenState extends State<SendScreen> {
       );
       if (result == null || !mounted) return;
 
-      final accessible =
+      final accessibleRaw =
           result.files.where((f) => f.path != null).toList();
+      final seenNames = <String>{};
+      final accessible = <PlatformFile>[];
+      for (final f in accessibleRaw) {
+        if (seenNames.add(f.name)) accessible.add(f);
+      }
 
       final oversized = accessible
           .where((f) => f.size > AppConstants.maxFileSizeBytes)
@@ -52,7 +68,18 @@ class _SendScreenState extends State<SendScreen> {
         return;
       }
 
-      final totalCount = _selectedFiles.length + accessible.length;
+      final existingNames = _selectedFiles.map((f) => f.name).toSet();
+      final duplicates =
+          accessible.where((f) => existingNames.contains(f.name)).toList();
+      final newFiles =
+          accessible.where((f) => !existingNames.contains(f.name)).toList();
+
+      if (newFiles.isEmpty && duplicates.isNotEmpty) {
+        _showDuplicateAlert(duplicates.map((f) => f.name).toList());
+        return;
+      }
+
+      final totalCount = _selectedFiles.length + newFiles.length;
       if (totalCount > AppConstants.maxFilesPerTransfer) {
         setState(() {
           _error =
@@ -62,9 +89,13 @@ class _SendScreenState extends State<SendScreen> {
       }
 
       setState(() {
-        _selectedFiles = [..._selectedFiles, ...accessible];
+        _selectedFiles = [..._selectedFiles, ...newFiles];
         _error = null;
       });
+
+      if (duplicates.isNotEmpty) {
+        _showDuplicateAlert(duplicates.map((f) => f.name).toList());
+      }
     } catch (e) {
       if (mounted) {
         setState(
@@ -78,6 +109,68 @@ class _SendScreenState extends State<SendScreen> {
     setState(() {
       _selectedFiles = List.from(_selectedFiles)..removeAt(index);
     });
+  }
+
+  void _showDuplicateAlert(List<String> fileNames) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.dialogBg,
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Icon(Icons.file_copy_rounded,
+                color: Colors.amber.shade400, size: 24),
+            const SizedBox(width: 10),
+            const Text(
+              'Duplicate Files',
+              style: TextStyle(color: Colors.white, fontSize: 18),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              fileNames.length == 1
+                  ? 'This file has already been added:'
+                  : 'These files have already been added:',
+              style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+            ),
+            const SizedBox(height: 12),
+            ...fileNames.map(
+              (name) => Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Row(
+                  children: [
+                    Icon(Icons.insert_drive_file_rounded,
+                        color: Colors.grey.shade500, size: 16),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        name,
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 13),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child:
+                Text('OK', style: TextStyle(color: Colors.amber.shade400)),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _send() async {
@@ -95,13 +188,31 @@ class _SendScreenState extends State<SendScreen> {
       return;
     }
 
+    // Pre-flight connectivity check
+    if (!await _hasConnectivity()) {
+      setState(() => _error = 'No internet connection. Please try again.');
+      return;
+    }
+
     setState(() {
       _validatingCode = true;
       _codeError = null;
       _error = null;
     });
 
-    final recipient = await IdentityService.findUserByCode(code);
+    Map<String, dynamic>? recipient;
+    try {
+      recipient = await IdentityService.findUserByCode(code);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _codeError = 'Could not validate code. Check your connection.';
+          _validatingCode = false;
+        });
+      }
+      return;
+    }
+
     if (recipient == null) {
       if (mounted) {
         setState(() {
@@ -137,7 +248,7 @@ class _SendScreenState extends State<SendScreen> {
               '${result.completedFiles} file(s) sent to $code',
             ),
             behavior: SnackBarBehavior.floating,
-            backgroundColor: const Color(0xFF4CAF50),
+            backgroundColor: AppColors.success,
           ),
         );
         Navigator.pop(context);
@@ -176,14 +287,7 @@ class _SendScreenState extends State<SendScreen> {
   }
 
   String _formatSize(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) {
-      return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    }
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+    return TransferService.formatFileSize(bytes);
   }
 
   @override
@@ -229,7 +333,7 @@ class _SendScreenState extends State<SendScreen> {
                 ),
                 counterText: '',
                 filled: true,
-                fillColor: const Color(0xFF1A1A24),
+                fillColor: AppColors.surface,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(16),
                   borderSide: BorderSide.none,
@@ -283,8 +387,9 @@ class _SendScreenState extends State<SendScreen> {
                             return _FileTile(
                               name: file.name,
                               size: _formatSize(file.size),
-                              onRemove:
-                                  _sending ? null : () => _removeFile(index),
+                              onRemove: _sending
+                                  ? null
+                                  : () => _removeFile(index),
                             );
                           },
                         ),
@@ -309,10 +414,9 @@ class _SendScreenState extends State<SendScreen> {
               width: double.infinity,
               height: 54,
               child: FilledButton(
-                onPressed:
-                    (_sending || _validatingCode) ? null : _send,
+                onPressed: (_sending || _validatingCode) ? null : _send,
                 style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFF6C63FF),
+                  backgroundColor: AppColors.primary,
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(16),
                   ),
@@ -408,7 +512,7 @@ class _UploadProgressList extends StatelessWidget {
                   value: states.isNotEmpty ? completed / states.length : 0,
                   backgroundColor: Colors.white12,
                   valueColor: const AlwaysStoppedAnimation(
-                    Color(0xFF6C63FF),
+                    AppColors.primary,
                   ),
                   minHeight: 6,
                 ),
@@ -440,7 +544,7 @@ class _FileProgressTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1A24),
+        color: AppColors.surface,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Column(
@@ -530,13 +634,13 @@ class _FileProgressTile extends StatelessWidget {
       case FileUploadStatus.uploading:
         return const Icon(
           Icons.cloud_upload_rounded,
-          color: Color(0xFF6C63FF),
+          color: AppColors.primary,
           size: 20,
         );
       case FileUploadStatus.completed:
         return const Icon(
           Icons.check_circle_rounded,
-          color: Color(0xFF4CAF50),
+          color: AppColors.success,
           size: 20,
         );
       case FileUploadStatus.failed:
@@ -568,11 +672,11 @@ class _FileProgressTile extends StatelessWidget {
       case FileUploadStatus.pending:
         return Colors.white24;
       case FileUploadStatus.hashing:
-        return const Color(0xFF3F8CFF);
+        return AppColors.primaryDark;
       case FileUploadStatus.uploading:
-        return const Color(0xFF6C63FF);
+        return AppColors.primary;
       case FileUploadStatus.completed:
-        return const Color(0xFF4CAF50);
+        return AppColors.success;
       case FileUploadStatus.failed:
         return Colors.redAccent;
     }
@@ -591,7 +695,7 @@ class _EmptyFilesView extends StatelessWidget {
       onTap: onPick,
       child: Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF1A1A24),
+          color: AppColors.surface,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
             color: Colors.white.withValues(alpha: 0.06),
@@ -639,14 +743,14 @@ class _FileTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1A24),
+        color: AppColors.surface,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
         children: [
           const Icon(
             Icons.insert_drive_file_rounded,
-            color: Color(0xFF6C63FF),
+            color: AppColors.primary,
             size: 22,
           ),
           const SizedBox(width: 12),

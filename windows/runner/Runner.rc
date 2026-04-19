@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.neosapien" "\0"
-            VALUE "FileDescription", "neosapien_share" "\0"
+            VALUE "CompanyName", "com.ZenSend" "\0"
+            VALUE "FileDescription", "ZenSend_share" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "neosapien_share" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.neosapien. All rights reserved." "\0"
-            VALUE "OriginalFilename", "neosapien_share.exe" "\0"
-            VALUE "ProductName", "neosapien_share" "\0"
+            VALUE "InternalName", "ZenSend_share" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 com.ZenSend. All rights reserved." "\0"
+            VALUE "OriginalFilename", "ZenSend_share.exe" "\0"
+            VALUE "ProductName", "ZenSend_share" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

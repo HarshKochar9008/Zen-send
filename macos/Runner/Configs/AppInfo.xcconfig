@@ -5,10 +5,10 @@
 // 'flutter create' template.
 
 // The application's name. By default this is also the title of the Flutter window.
-PRODUCT_NAME = neosapien_share
+PRODUCT_NAME = ZenSend_share
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.yourname.neosapienShare
+PRODUCT_BUNDLE_IDENTIFIER = com.yourname.ZenSendShare
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 com.yourname. All rights reserved.

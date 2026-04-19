@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:file_picker/file_picker.dart';
@@ -95,6 +96,25 @@ class IntegrityException implements Exception {
   String toString() => 'Integrity check failed for $fileName.';
 }
 
+class NoConnectionException implements Exception {
+  @override
+  String toString() => 'No internet connection. Please check your network.';
+}
+
+class AuthenticationException implements Exception {
+  @override
+  String toString() => 'Session expired. Please restart the app.';
+}
+
+class StorageUploadException implements Exception {
+  final int statusCode;
+  final String details;
+  StorageUploadException(this.statusCode, this.details);
+
+  @override
+  String toString() => 'Upload failed ($statusCode): $details';
+}
+
 // ── SHA-256 helper sink ──────────────────────────────────────────────────────
 
 class _DigestSink implements Sink<Digest> {
@@ -138,6 +158,18 @@ class TransferService {
     return safe;
   }
 
+  /// Human-readable file size formatting.
+  static String formatFileSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
+
   // ── Streaming upload (avoids loading full file into RAM) ─────────────────
 
   static Future<void> _streamUpload({
@@ -146,8 +178,9 @@ class TransferService {
     required String contentType,
     void Function(int sent, int total)? onProgress,
   }) async {
+    await SupabaseConfig.ensureValidSession();
     final session = SupabaseConfig.client.auth.currentSession;
-    if (session == null) throw Exception('Not authenticated');
+    if (session == null) throw AuthenticationException();
 
     final fileLength = await file.length();
     final url = Uri.parse(
@@ -175,9 +208,7 @@ class TransferService {
       final body = await response.transform(utf8.decoder).join();
 
       if (response.statusCode >= 400) {
-        throw Exception(
-          'Storage upload failed (${response.statusCode}): $body',
-        );
+        throw StorageUploadException(response.statusCode, body);
       }
     } finally {
       httpClient.close();
@@ -186,14 +217,13 @@ class TransferService {
 
   // ── Send files ───────────────────────────────────────────────────────────
 
-  /// Upload files to a recipient using streaming I/O.
-  /// Reports per-file progress via [onProgress].
   static Future<TransferResult> sendFiles({
     required String senderId,
     required String receiverId,
     required List<PlatformFile> files,
     required void Function(List<FileUploadProgress> states) onProgress,
   }) async {
+    await SupabaseConfig.ensureValidSession();
     final client = SupabaseConfig.client;
 
     for (final file in files) {
@@ -215,7 +245,7 @@ class TransferService {
         .insert({
           'sender_id': senderId,
           'receiver_id': receiverId,
-          'status': 'uploading',
+          'status': 'pending',
         })
         .select()
         .single();
@@ -258,12 +288,14 @@ class TransferService {
         String hash;
         try {
           hash = await computeSha256(diskFile, onProgress: (p, t) {
-            states = _updateState(
-              states,
-              i,
-              states[i].copyWith(progress: t > 0 ? p / t : 0),
-            );
-            onProgress(states);
+            if (t > 0) {
+              states = _updateState(
+                states,
+                i,
+                states[i].copyWith(progress: p / t),
+              );
+              onProgress(states);
+            }
           });
         } catch (e) {
           states = _updateState(
@@ -271,7 +303,7 @@ class TransferService {
             i,
             states[i].copyWith(
               status: FileUploadStatus.failed,
-              error: 'Hash computation failed',
+              error: 'Hash computation failed: ${e.toString().replaceAll('Exception: ', '')}',
             ),
           );
           onProgress(states);
@@ -307,14 +339,14 @@ class TransferService {
               file: diskFile,
               contentType: mimeType,
               onProgress: (sent, total) {
-                states = _updateState(
-                  states,
-                  i,
-                  states[i].copyWith(
-                    progress: total > 0 ? sent / total : 0,
-                  ),
-                );
-                onProgress(states);
+                if (total > 0) {
+                  states = _updateState(
+                    states,
+                    i,
+                    states[i].copyWith(progress: sent / total),
+                  );
+                  onProgress(states);
+                }
               },
             );
 
@@ -330,7 +362,7 @@ class TransferService {
             uploaded = true;
             break;
           } catch (e) {
-            lastError = e.toString();
+            lastError = e.toString().replaceAll('Exception: ', '');
             if (attempt < _maxRetries) {
               await Future.delayed(Duration(seconds: attempt * 2));
             }
@@ -365,16 +397,15 @@ class TransferService {
       final anyDone =
           states.any((s) => s.status == FileUploadStatus.completed);
 
-      await client
-          .from('transfers')
-          .update({
-            'status': allDone
-                ? 'completed'
-                : anyDone
-                    ? 'partial'
-                    : 'failed',
-          })
-          .eq('id', transferId);
+      await _safeUpdateTransferStatus(
+        client,
+        transferId,
+        allDone
+            ? 'completed'
+            : anyDone
+                ? 'partial'
+                : 'failed',
+      );
 
       return TransferResult(
         success: allDone,
@@ -383,22 +414,57 @@ class TransferService {
         fileStates: states,
       );
     } catch (e) {
-      await client
-          .from('transfers')
-          .update({'status': 'failed'})
-          .eq('id', transferId);
+      await _safeUpdateTransferStatus(client, transferId, 'failed');
       rethrow;
     }
   }
 
-  /// Insert a transfer_files row. Falls back without sha256_hash if the
-  /// column does not exist yet in the user's Supabase schema.
+  /// Updates the transfer status, handling the case where `status` is a
+  /// Postgres ENUM that may not contain all values (e.g. 'failed', 'partial').
+  /// Falls back to 'completed' or 'pending' if the desired value is rejected.
+  static Future<void> _safeUpdateTransferStatus(
+    SupabaseClient client,
+    String transferId,
+    String desiredStatus,
+  ) async {
+    try {
+      await client
+          .from('transfers')
+          .update({'status': desiredStatus})
+          .eq('id', transferId);
+    } on PostgrestException catch (e) {
+      // 22P02 = invalid_text_representation (enum value not found)
+      if (e.code == '22P02') {
+        // Try a safe fallback the enum is likely to have
+        final fallback =
+            (desiredStatus == 'completed') ? 'completed' : 'pending';
+        try {
+          await client
+              .from('transfers')
+              .update({'status': fallback})
+              .eq('id', transferId);
+        } catch (_) {
+          // Status update is non-critical — the files are already uploaded
+        }
+      }
+      // For other errors, silently ignore — don't crash the transfer
+    }
+  }
+
+  /// Insert a transfer_files row.
+  /// Only falls back without sha256_hash on PostgreSQL 42703 (undefined_column),
+  /// which means the column doesn't exist in the schema yet.
   static Future<void> _insertTransferFile(Map<String, dynamic> data) async {
     try {
       await SupabaseConfig.client.from('transfer_files').insert(data);
-    } on PostgrestException {
-      final fallback = Map<String, dynamic>.from(data)..remove('sha256_hash');
-      await SupabaseConfig.client.from('transfer_files').insert(fallback);
+    } on PostgrestException catch (e) {
+      if (e.code == '42703') {
+        final fallback = Map<String, dynamic>.from(data)
+          ..remove('sha256_hash');
+        await SupabaseConfig.client.from('transfer_files').insert(fallback);
+      } else {
+        rethrow;
+      }
     }
   }
 
@@ -412,16 +478,53 @@ class TransferService {
     return updated;
   }
 
-  // ── Incoming transfers ───────────────────────────────────────────────────
+  // ── Incoming transfers (with pagination + TTL filtering) ────────────────
 
   static Future<List<Map<String, dynamic>>> getIncomingTransfers(
-    String userId,
-  ) async {
+    String userId, {
+    int page = 0,
+  }) async {
+    await SupabaseConfig.ensureValidSession();
+    final offset = page * AppConstants.transfersPageSize;
+
     final result = await SupabaseConfig.client
         .from('transfers')
         .select('*, sender:users!transfers_sender_id_fkey(short_code)')
         .eq('receiver_id', userId)
-        .order('created_at', ascending: false);
+        .order('created_at', ascending: false)
+        .range(offset, offset + AppConstants.transfersPageSize - 1);
+
+    final transfers = List<Map<String, dynamic>>.from(result);
+
+    // Client-side TTL enforcement: mark expired transfers
+    final ttlCutoff = DateTime.now()
+        .toUtc()
+        .subtract(Duration(hours: AppConstants.transferTtlHours));
+
+    return transfers.map((t) {
+      final createdAt = DateTime.tryParse(t['created_at'] ?? '');
+      if (createdAt != null && createdAt.isBefore(ttlCutoff)) {
+        return {...t, 'status': 'expired'};
+      }
+      return t;
+    }).toList();
+  }
+
+  // ── Sent transfers (history) ───────────────────────────────────────────
+
+  static Future<List<Map<String, dynamic>>> getSentTransfers(
+    String userId, {
+    int page = 0,
+  }) async {
+    await SupabaseConfig.ensureValidSession();
+    final offset = page * AppConstants.transfersPageSize;
+
+    final result = await SupabaseConfig.client
+        .from('transfers')
+        .select('*, receiver:users!transfers_receiver_id_fkey(short_code)')
+        .eq('sender_id', userId)
+        .order('created_at', ascending: false)
+        .range(offset, offset + AppConstants.transfersPageSize - 1);
 
     return List<Map<String, dynamic>>.from(result);
   }
@@ -429,6 +532,7 @@ class TransferService {
   static Future<List<Map<String, dynamic>>> getTransferFiles(
     String transferId,
   ) async {
+    await SupabaseConfig.ensureValidSession();
     final result = await SupabaseConfig.client
         .from('transfer_files')
         .select()
@@ -438,15 +542,14 @@ class TransferService {
     return List<Map<String, dynamic>>.from(result);
   }
 
-  // ── Streaming download (constant memory) ─────────────────────────────────
+  // ── Streaming download (constant memory, collision-safe) ───────────────
 
-  /// Download a file to a temporary path on disk, reporting byte-level
-  /// progress. Never loads the full payload into RAM.
   static Future<File> downloadToFile({
     required String storagePath,
     required String fileName,
     required void Function(int received, int total) onProgress,
   }) async {
+    await SupabaseConfig.ensureValidSession();
     final url = await SupabaseConfig.client.storage
         .from('transfers')
         .createSignedUrl(storagePath, 3600);
@@ -459,13 +562,19 @@ class TransferService {
       var receivedBytes = 0;
 
       final tempDir = await getTemporaryDirectory();
-      final file = File('${tempDir.path}/${sanitizeFileName(fileName)}');
+      // Prefix with random to avoid collisions when multiple files have the same name
+      final uniquePrefix =
+          '${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(99999)}';
+      final file =
+          File('${tempDir.path}/${uniquePrefix}_${sanitizeFileName(fileName)}');
       final sink = file.openWrite();
 
       await for (final chunk in response) {
         sink.add(chunk);
         receivedBytes += chunk.length;
-        onProgress(receivedBytes, totalBytes);
+        // Guard against -1 content length (chunked transfer encoding)
+        final safeTotal = totalBytes > 0 ? totalBytes : receivedBytes;
+        onProgress(receivedBytes, safeTotal);
       }
 
       await sink.close();
@@ -484,6 +593,7 @@ class TransferService {
 
   /// Convenience: get a signed URL for browser/external download.
   static Future<String> getDownloadUrl(String storagePath) async {
+    await SupabaseConfig.ensureValidSession();
     return await SupabaseConfig.client.storage
         .from('transfers')
         .createSignedUrl(storagePath, 3600);
@@ -491,14 +601,17 @@ class TransferService {
 
   // ── Supabase Realtime ────────────────────────────────────────────────────
 
-  /// Subscribe to new incoming transfers via Postgres CDC.
-  /// Returns the channel (caller must [unsubscribe] in dispose).
+  /// Subscribe to incoming transfers via Postgres CDC.
+  /// Listens for both INSERT (new transfer created) and UPDATE (status changed
+  /// to completed) so the receiver is notified when files are actually ready.
   static RealtimeChannel? subscribeToIncoming({
     required String userId,
     required void Function(Map<String, dynamic> newRecord) onNewTransfer,
   }) {
     try {
       final channel = SupabaseConfig.client.channel('incoming-$userId');
+
+      // Notify on new transfer creation
       channel.onPostgresChanges(
         event: PostgresChangeEvent.insert,
         schema: 'public',
@@ -512,6 +625,23 @@ class TransferService {
           onNewTransfer(payload.newRecord);
         },
       );
+
+      // Also notify when transfer status changes (e.g. pending → completed)
+      // so the receiver refreshes and sees files are ready to download
+      channel.onPostgresChanges(
+        event: PostgresChangeEvent.update,
+        schema: 'public',
+        table: 'transfers',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'receiver_id',
+          value: userId,
+        ),
+        callback: (PostgresChangePayload payload) {
+          onNewTransfer(payload.newRecord);
+        },
+      );
+
       channel.subscribe();
       return channel;
     } catch (_) {

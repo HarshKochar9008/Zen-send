@@ -17,7 +17,7 @@
         android:maxSdkVersion="29"/>
 
     <application
-        android:label="neosapien_share"
+        android:label="ZenSend_share"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

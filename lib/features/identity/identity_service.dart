@@ -16,9 +16,6 @@ class IdentityService {
   static UserIdentity? _cached;
   static const _maxCodeAttempts = 10;
 
-  /// Returns the user's identity.
-  /// First launch: anonymous sign-in → generate unique short code → persist.
-  /// Subsequent launches: restore from SharedPreferences.
   static Future<UserIdentity> initialize() async {
     if (_cached != null) return _cached!;
 
@@ -26,24 +23,37 @@ class IdentityService {
     final savedCode = prefs.getString(AppConstants.prefShortCode);
     final savedId = prefs.getString(AppConstants.prefUserDbId);
 
-    if (SupabaseConfig.client.auth.currentSession != null &&
-        savedCode != null &&
-        savedId != null) {
-      _cached = UserIdentity(id: savedId, shortCode: savedCode);
-      return _cached!;
+    // Try to restore from existing session + saved identity
+    if (savedCode != null && savedId != null) {
+      final session = SupabaseConfig.client.auth.currentSession;
+      if (session != null) {
+        await SupabaseConfig.ensureValidSession();
+        _cached = UserIdentity(id: savedId, shortCode: savedCode);
+        return _cached!;
+      }
+
+      // Session expired but identity exists — try to re-authenticate
+      try {
+        await SupabaseConfig.client.auth.signInAnonymously();
+        _cached = UserIdentity(id: savedId, shortCode: savedCode);
+        return _cached!;
+      } catch (_) {
+        // Fall through to full re-provisioning
+      }
     }
 
+    // First launch or full re-provisioning
     final authResponse =
         await SupabaseConfig.client.auth.signInAnonymously();
 
     if (authResponse.user == null) {
-      throw Exception(
+      throw AuthFailedException(
         'Anonymous sign-in failed. '
-        'Ensure anonymous auth is enabled in Supabase → Auth → Settings.',
+        'Ensure anonymous auth is enabled in Supabase Dashboard '
+        '→ Auth → Settings.',
       );
     }
 
-    // Atomic collision handling: INSERT directly; retry on unique violation.
     for (var attempt = 0; attempt < _maxCodeAttempts; attempt++) {
       final code = ShortCodeGenerator.generate();
       try {
@@ -63,20 +73,19 @@ class IdentityService {
         _cached = UserIdentity(id: userId, shortCode: code);
         return _cached!;
       } on PostgrestException catch (e) {
-        // 23505 = unique_violation — short_code already taken
         final isDuplicate = e.code == '23505';
         if (!isDuplicate || attempt == _maxCodeAttempts - 1) rethrow;
       }
     }
 
-    throw Exception(
+    throw CodeGenerationException(
       'Could not generate a unique short code after $_maxCodeAttempts '
-      'attempts. Please restart the app to try again.',
+      'attempts. Please restart the app.',
     );
   }
 
-  /// Look up a recipient by their short code. Returns null if not found.
   static Future<Map<String, dynamic>?> findUserByCode(String code) async {
+    await SupabaseConfig.ensureValidSession();
     return await SupabaseConfig.client
         .from('users')
         .select('id, short_code')
@@ -85,4 +94,18 @@ class IdentityService {
   }
 
   static void clearCache() => _cached = null;
+}
+
+class AuthFailedException implements Exception {
+  final String message;
+  AuthFailedException(this.message);
+  @override
+  String toString() => message;
+}
+
+class CodeGenerationException implements Exception {
+  final String message;
+  CodeGenerationException(this.message);
+  @override
+  String toString() => message;
 }

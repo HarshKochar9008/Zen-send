@@ -31,17 +31,16 @@ Future<String> saveFileToDevice(File file, String fileName) async {
     await _ensureGalleryPermission();
     try {
       if (isImage) {
-        await Gal.putImage(file.path, album: 'NeoShare');
+        await Gal.putImage(file.path, album: 'ZenShare');
       } else {
-        await Gal.putVideo(file.path, album: 'NeoShare');
+        await Gal.putVideo(file.path, album: 'ZenShare');
       }
-      return 'Gallery (NeoShare album)';
+      return 'Gallery (ZenShare album)';
     } catch (e) {
       throw SaveFileException('Could not save to gallery: $e');
     }
   }
 
-  // Non-media file → platform-specific location
   return _saveNonMedia(file, fileName);
 }
 
@@ -53,36 +52,74 @@ Future<void> _ensureGalleryPermission() async {
         'Gallery access denied. Please enable it in Settings → Privacy → Photos.',
       );
     }
+  } else if (defaultTargetPlatform == TargetPlatform.android) {
+    // On Android, permission_handler automatically resolves the correct
+    // permission based on the device's actual SDK version:
+    //   - API 33+: READ_MEDIA_IMAGES / READ_MEDIA_VIDEO (granular)
+    //   - API 29-32: READ_EXTERNAL_STORAGE
+    //   - API ≤28: WRITE_EXTERNAL_STORAGE
+    // The Gal plugin also handles MediaStore internally.
+    // We request both granular permissions; permission_handler no-ops
+    // on devices where they don't apply.
+    final photos = await Permission.photos.request();
+    final videos = await Permission.videos.request();
+
+    // If both are permanently denied or restricted, fall back to storage
+    if (!photos.isGranted && !videos.isGranted) {
+      final storage = await Permission.storage.request();
+      if (!storage.isGranted) {
+        throw PermissionDeniedException(
+          'Media access denied. Please enable it in Settings → App Permissions.',
+        );
+      }
+    }
   }
-  // Android: Gal handles permissions via WRITE_EXTERNAL_STORAGE / MediaStore
 }
 
 Future<String> _saveNonMedia(File file, String fileName) async {
   if (defaultTargetPlatform == TargetPlatform.android) {
     final downloads = Directory('/storage/emulated/0/Download');
     if (await downloads.exists()) {
-      final savePath = '${downloads.path}/$fileName';
+      final savePath = _uniquePath(downloads.path, fileName);
       await file.copy(savePath);
       return savePath;
     }
 
     final extDir = await getExternalStorageDirectory();
     if (extDir != null) {
-      final savePath = '${extDir.path}/$fileName';
+      final savePath = _uniquePath(extDir.path, fileName);
       await file.copy(savePath);
       return savePath;
     }
   }
 
-  // iOS or fallback: app-scoped Documents/NeoShare/
+  // iOS or fallback
   final docsDir = await getApplicationDocumentsDirectory();
-  final neoShareDir = Directory('${docsDir.path}/NeoShare');
-  if (!await neoShareDir.exists()) {
-    await neoShareDir.create(recursive: true);
+  final zenShareDir = Directory('${docsDir.path}/ZenShare');
+  if (!await zenShareDir.exists()) {
+    await zenShareDir.create(recursive: true);
   }
-  final savePath = '${neoShareDir.path}/$fileName';
+  final savePath = _uniquePath(zenShareDir.path, fileName);
   await file.copy(savePath);
   return savePath;
+}
+
+/// Generates a unique file path to avoid overwriting existing files.
+String _uniquePath(String dir, String fileName) {
+  var target = '$dir/$fileName';
+  if (!File(target).existsSync()) return target;
+
+  final dotIdx = fileName.lastIndexOf('.');
+  final baseName = dotIdx > 0 ? fileName.substring(0, dotIdx) : fileName;
+  final ext = dotIdx > 0 ? fileName.substring(dotIdx) : '';
+
+  var counter = 1;
+  do {
+    target = '$dir/${baseName}_($counter)$ext';
+    counter++;
+  } while (File(target).existsSync());
+
+  return target;
 }
 
 const _imageExts = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic'};

@@ -1,10 +1,9 @@
-import 'dart:io';
-
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide UserIdentity;
-import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/constants.dart';
+import '../../core/theme.dart';
 import '../identity/identity_service.dart';
 import '../transfer/transfer_service.dart';
 import 'save_file.dart';
@@ -24,6 +23,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   bool _loading = true;
   String? _error;
   RealtimeChannel? _channel;
+  int _currentPage = 0;
+  bool _hasMore = true;
 
   @override
   void initState() {
@@ -41,15 +42,19 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   void _subscribeToRealtime() {
     _channel = TransferService.subscribeToIncoming(
       userId: widget.identity.id,
-      onNewTransfer: (_) {
+      onNewTransfer: (record) {
         _loadTransfers();
         if (mounted) {
+          final status = record['status'] as String? ?? 'pending';
+          final msg = status == 'completed'
+              ? 'Transfer ready — files available for download!'
+              : 'New file transfer incoming…';
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('New file transfer received!'),
+            SnackBar(
+              content: Text(msg),
               behavior: SnackBarBehavior.floating,
-              backgroundColor: Color(0xFF6C63FF),
-              duration: Duration(seconds: 3),
+              backgroundColor: AppColors.primary,
+              duration: const Duration(seconds: 3),
             ),
           );
         }
@@ -61,14 +66,18 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     setState(() {
       _loading = true;
       _error = null;
+      _currentPage = 0;
     });
     try {
-      final transfers =
-          await TransferService.getIncomingTransfers(widget.identity.id);
+      final transfers = await TransferService.getIncomingTransfers(
+        widget.identity.id,
+        page: 0,
+      );
       if (mounted) {
         setState(() {
           _transfers = transfers;
           _loading = false;
+          _hasMore = transfers.length >= AppConstants.transfersPageSize;
         });
       }
     } catch (e) {
@@ -81,8 +90,27 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     }
   }
 
+  Future<void> _loadMore() async {
+    if (!_hasMore) return;
+    final nextPage = _currentPage + 1;
+    try {
+      final more = await TransferService.getIncomingTransfers(
+        widget.identity.id,
+        page: nextPage,
+      );
+      if (mounted) {
+        setState(() {
+          _transfers = [...?_transfers, ...more];
+          _currentPage = nextPage;
+          _hasMore = more.length >= AppConstants.transfersPageSize;
+        });
+      }
+    } catch (_) {}
+  }
+
   String _timeAgo(String isoDate) {
-    final date = DateTime.parse(isoDate);
+    final date = DateTime.tryParse(isoDate);
+    if (date == null) return '';
     final diff = DateTime.now().toUtc().difference(date);
     if (diff.inMinutes < 1) return 'Just now';
     if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
@@ -129,10 +157,21 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                       onRefresh: _loadTransfers,
                       child: ListView.separated(
                         padding: const EdgeInsets.all(20),
-                        itemCount: _transfers!.length,
+                        itemCount: _transfers!.length + (_hasMore ? 1 : 0),
                         separatorBuilder: (_, __) =>
                             const SizedBox(height: 12),
                         itemBuilder: (context, index) {
+                          if (index == _transfers!.length) {
+                            _loadMore();
+                            return const Center(
+                              child: Padding(
+                                padding: EdgeInsets.all(16),
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2),
+                              ),
+                            );
+                          }
+
                           final t = _transfers![index];
                           final senderCode =
                               (t['sender'] as Map?)?['short_code'] ?? '???';
@@ -140,19 +179,24 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                               (t['status'] ?? 'pending') as String;
                           final createdAt =
                               (t['created_at'] ?? '') as String;
+                          final isExpired = status == 'expired';
                           return _TransferCard(
                             senderCode: senderCode,
                             status: status,
                             timeAgo: _timeAgo(createdAt),
-                            onTap: () => Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => _TransferDetailScreen(
-                                  transferId: t['id'] as String,
-                                  senderCode: senderCode,
-                                ),
-                              ),
-                            ),
+                            isExpired: isExpired,
+                            onTap: isExpired
+                                ? null
+                                : () => Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) =>
+                                            _TransferDetailScreen(
+                                          transferId: t['id'] as String,
+                                          senderCode: senderCode,
+                                        ),
+                                      ),
+                                    ),
                           );
                         },
                       ),
@@ -183,7 +227,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 : 'Pull down to refresh',
             style: TextStyle(
               color: _channel != null
-                  ? const Color(0xFF4CAF50)
+                  ? AppColors.success
                   : Colors.white24,
               fontSize: 11,
             ),
@@ -200,26 +244,30 @@ class _TransferCard extends StatelessWidget {
   final String senderCode;
   final String status;
   final String timeAgo;
-  final VoidCallback onTap;
+  final bool isExpired;
+  final VoidCallback? onTap;
 
   const _TransferCard({
     required this.senderCode,
     required this.status,
     required this.timeAgo,
-    required this.onTap,
+    this.isExpired = false,
+    this.onTap,
   });
 
   Color _statusColor() {
     switch (status) {
       case 'completed':
-        return const Color(0xFF4CAF50);
+        return AppColors.success;
       case 'uploading':
       case 'pending':
-        return const Color(0xFFFFA726);
+        return AppColors.warning;
       case 'partial':
-        return const Color(0xFFFF7043);
+        return AppColors.error;
       case 'expired':
         return Colors.white24;
+      case 'failed':
+        return Colors.redAccent;
       default:
         return Colors.white38;
     }
@@ -229,79 +277,88 @@ class _TransferCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: const Color(0xFF1A1A24),
-          borderRadius: BorderRadius.circular(16),
-          border:
-              Border.all(color: Colors.white.withValues(alpha: 0.06)),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 46,
-              height: 46,
-              decoration: BoxDecoration(
-                color: const Color(0xFF3F8CFF).withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(12),
+      child: Opacity(
+        opacity: isExpired ? 0.5 : 1.0,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(16),
+            border:
+                Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  color:
+                      AppColors.primaryDark.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  isExpired
+                      ? Icons.timer_off_rounded
+                      : Icons.person_rounded,
+                  color: isExpired
+                      ? Colors.white24
+                      : AppColors.primaryDark,
+                  size: 22,
+                ),
               ),
-              child: const Icon(
-                Icons.person_rounded,
-                color: Color(0xFF3F8CFF),
-                size: 22,
-              ),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'From $senderCode',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 15,
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'From $senderCode',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 15,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 2),
-                  Row(
-                    children: [
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          color: _statusColor(),
-                          shape: BoxShape.circle,
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: _statusColor(),
+                            shape: BoxShape.circle,
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        status,
-                        style: const TextStyle(
-                          color: Colors.white54,
-                          fontSize: 12,
+                        const SizedBox(width: 6),
+                        Text(
+                          isExpired ? 'Expired' : status,
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 12,
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        timeAgo,
-                        style: const TextStyle(
-                          color: Colors.white24,
-                          fontSize: 12,
+                        const SizedBox(width: 8),
+                        Text(
+                          timeAgo,
+                          style: const TextStyle(
+                            color: Colors.white24,
+                            fontSize: 12,
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                ],
+                      ],
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const Icon(
-              Icons.chevron_right_rounded,
-              color: Colors.white24,
-              size: 22,
-            ),
-          ],
+              if (!isExpired)
+                const Icon(
+                  Icons.chevron_right_rounded,
+                  color: Colors.white24,
+                  size: 22,
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -310,7 +367,14 @@ class _TransferCard extends StatelessWidget {
 
 // ── Transfer detail screen ───────────────────────────────────────────────────
 
-enum _DownloadStatus { idle, downloading, verifying, saving, completed, failed }
+enum _DownloadStatus {
+  idle,
+  downloading,
+  verifying,
+  saving,
+  completed,
+  failed,
+}
 
 class _FileDownloadState {
   final _DownloadStatus status;
@@ -342,17 +406,52 @@ class _TransferDetailScreen extends StatefulWidget {
 }
 
 class _TransferDetailScreenState extends State<_TransferDetailScreen> {
+  static const _downloadedKeysPrefix = 'downloaded_files_';
   List<Map<String, dynamic>>? _files;
   bool _loading = true;
+  String? _loadError;
   final Map<String, _FileDownloadState> _dlStates = {};
+  Set<String> _persistedDownloads = {};
 
   @override
   void initState() {
     super.initState();
+    _loadPersistedState();
     _loadFiles();
   }
 
+  Future<void> _loadPersistedState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getStringList(
+      '$_downloadedKeysPrefix${widget.transferId}',
+    );
+    if (saved != null && mounted) {
+      setState(() {
+        _persistedDownloads = saved.toSet();
+        for (final fileId in _persistedDownloads) {
+          _dlStates[fileId] = const _FileDownloadState(
+            status: _DownloadStatus.completed,
+            progress: 1.0,
+          );
+        }
+      });
+    }
+  }
+
+  Future<void> _markDownloaded(String fileId) async {
+    _persistedDownloads.add(fileId);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+      '$_downloadedKeysPrefix${widget.transferId}',
+      _persistedDownloads.toList(),
+    );
+  }
+
   Future<void> _loadFiles() async {
+    setState(() {
+      _loading = true;
+      _loadError = null;
+    });
     try {
       final files =
           await TransferService.getTransferFiles(widget.transferId);
@@ -362,19 +461,20 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
           _loading = false;
         });
       }
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loadError =
+              'Could not load files: ${e.toString().replaceAll('Exception: ', '')}';
+          _loading = false;
+        });
+      }
     }
   }
 
   String _formatSize(dynamic bytes) {
     final b = (bytes is int) ? bytes : int.tryParse(bytes.toString()) ?? 0;
-    if (b < 1024) return '$b B';
-    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} KB';
-    if (b < 1024 * 1024 * 1024) {
-      return '${(b / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(b / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+    return TransferService.formatFileSize(b);
   }
 
   Future<void> _downloadFile(Map<String, dynamic> file) async {
@@ -383,44 +483,36 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
     final fileName = file['file_name'] as String;
     final expectedHash = file['sha256_hash'] as String?;
 
+    // Persistent duplicate delivery prevention
+    if (_persistedDownloads.contains(fileId)) return;
+    final existingState = _dlStates[fileId];
+    if (existingState?.status == _DownloadStatus.completed) return;
+
     setState(() => _dlStates[fileId] = const _FileDownloadState(
-      status: _DownloadStatus.downloading,
-    ));
+          status: _DownloadStatus.downloading,
+        ));
 
     try {
-      // ── Stream download to disk ──────────────────────────────────────
-      late final File downloadedFile;
-
-      if (kIsWeb) {
-        final url = await TransferService.getDownloadUrl(storagePath);
-        await launchUrl(
-          Uri.parse(url),
-          mode: LaunchMode.externalApplication,
-        );
-        setState(() => _dlStates[fileId] = const _FileDownloadState(
-          status: _DownloadStatus.completed,
-        ));
-        return;
-      }
-
-      downloadedFile = await TransferService.downloadToFile(
+      final downloadedFile = await TransferService.downloadToFile(
         storagePath: storagePath,
         fileName: fileName,
         onProgress: (received, total) {
           if (mounted) {
             setState(() => _dlStates[fileId] = _FileDownloadState(
-              status: _DownloadStatus.downloading,
-              progress: total > 0 ? received / total : 0,
-            ));
+                  status: _DownloadStatus.downloading,
+                  progress: total > 0 ? received / total : 0,
+                ));
           }
         },
       );
 
       // ── Verify SHA-256 ───────────────────────────────────────────────
-      setState(() => _dlStates[fileId] = const _FileDownloadState(
-        status: _DownloadStatus.verifying,
-        progress: 1.0,
-      ));
+      if (mounted) {
+        setState(() => _dlStates[fileId] = const _FileDownloadState(
+              status: _DownloadStatus.verifying,
+              progress: 1.0,
+            ));
+      }
 
       bool? hashVerified;
       if (expectedHash != null && expectedHash.isNotEmpty) {
@@ -429,32 +521,40 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
           expectedHash,
         );
         if (hashVerified == false) {
-          setState(() => _dlStates[fileId] = const _FileDownloadState(
-            status: _DownloadStatus.failed,
-            error: 'Integrity check failed — file may be corrupted',
-            hashVerified: false,
-          ));
+          if (mounted) {
+            setState(() => _dlStates[fileId] = const _FileDownloadState(
+                  status: _DownloadStatus.failed,
+                  error:
+                      'Integrity check failed — file may be corrupted',
+                  hashVerified: false,
+                ));
+          }
           return;
         }
       }
 
       // ── Save to device ───────────────────────────────────────────────
-      setState(() => _dlStates[fileId] = _FileDownloadState(
-        status: _DownloadStatus.saving,
-        progress: 1.0,
-        hashVerified: hashVerified,
-      ));
+      if (mounted) {
+        setState(() => _dlStates[fileId] = _FileDownloadState(
+              status: _DownloadStatus.saving,
+              progress: 1.0,
+              hashVerified: hashVerified,
+            ));
+      }
 
       final location = await saveFileToDevice(downloadedFile, fileName);
 
-      setState(() => _dlStates[fileId] = _FileDownloadState(
-        status: _DownloadStatus.completed,
-        progress: 1.0,
-        hashVerified: hashVerified,
-        savedLocation: location,
-      ));
+      // Persist download completion across app restarts
+      await _markDownloaded(fileId);
 
       if (mounted) {
+        setState(() => _dlStates[fileId] = _FileDownloadState(
+              status: _DownloadStatus.completed,
+              progress: 1.0,
+              hashVerified: hashVerified,
+              savedLocation: location,
+            ));
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -463,23 +563,24 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
             ),
             duration: const Duration(seconds: 4),
             behavior: SnackBarBehavior.floating,
-            backgroundColor: const Color(0xFF4CAF50),
+            backgroundColor: AppColors.success,
           ),
         );
       }
     } on PermissionDeniedException catch (e) {
       if (mounted) {
         setState(() => _dlStates[fileId] = _FileDownloadState(
-          status: _DownloadStatus.failed,
-          error: e.message,
-        ));
+              status: _DownloadStatus.failed,
+              error: e.message,
+            ));
       }
     } catch (e) {
       if (mounted) {
         setState(() => _dlStates[fileId] = _FileDownloadState(
-          status: _DownloadStatus.failed,
-          error: 'Download failed: ${e.toString().replaceAll('Exception: ', '')}',
-        ));
+              status: _DownloadStatus.failed,
+              error:
+                  'Download failed: ${e.toString().replaceAll('Exception: ', '')}',
+            ));
       }
     }
   }
@@ -518,31 +619,52 @@ class _TransferDetailScreenState extends State<_TransferDetailScreen> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _files == null || _files!.isEmpty
-              ? const Center(
-                  child: Text(
-                    'No files in this transfer',
-                    style: TextStyle(color: Colors.white38),
+          : _loadError != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _loadError!,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Colors.white54),
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          onPressed: _loadFiles,
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
                   ),
                 )
-              : ListView.separated(
-                  padding: const EdgeInsets.all(20),
-                  itemCount: _files!.length,
-                  separatorBuilder: (_, __) =>
-                      const SizedBox(height: 10),
-                  itemBuilder: (context, index) {
-                    final file = _files![index];
-                    final fileId = file['id'] as String;
-                    final dlState = _dlStates[fileId];
+              : _files == null || _files!.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'No files in this transfer',
+                        style: TextStyle(color: Colors.white38),
+                      ),
+                    )
+                  : ListView.separated(
+                      padding: const EdgeInsets.all(20),
+                      itemCount: _files!.length,
+                      separatorBuilder: (_, __) =>
+                          const SizedBox(height: 10),
+                      itemBuilder: (context, index) {
+                        final file = _files![index];
+                        final fileId = file['id'] as String;
+                        final dlState = _dlStates[fileId];
 
-                    return _FileDownloadTile(
-                      fileName: file['file_name'] as String,
-                      fileSize: _formatSize(file['file_size']),
-                      state: dlState,
-                      onDownload: () => _downloadFile(file),
-                    );
-                  },
-                ),
+                        return _FileDownloadTile(
+                          fileName: file['file_name'] as String,
+                          fileSize: _formatSize(file['file_size']),
+                          state: dlState,
+                          onDownload: () => _downloadFile(file),
+                        );
+                      },
+                    ),
     );
   }
 }
@@ -569,7 +691,7 @@ class _FileDownloadTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1A24),
+        color: AppColors.surface,
         borderRadius: BorderRadius.circular(14),
       ),
       child: Column(
@@ -617,7 +739,7 @@ class _FileDownloadTile extends StatelessWidget {
                 value: state!.progress,
                 backgroundColor: Colors.white12,
                 valueColor: const AlwaysStoppedAnimation(
-                  Color(0xFF3F8CFF),
+                  AppColors.primaryDark,
                 ),
                 minHeight: 4,
               ),
@@ -637,7 +759,7 @@ class _FileDownloadTile extends StatelessWidget {
             const Text(
               'Verifying file integrity (SHA-256)…',
               style: TextStyle(
-                color: Color(0xFF3F8CFF),
+                color: AppColors.primaryDark,
                 fontSize: 11,
               ),
             ),
@@ -648,7 +770,7 @@ class _FileDownloadTile extends StatelessWidget {
             const Text(
               'Saving to device…',
               style: TextStyle(
-                color: Color(0xFFFFA726),
+                color: AppColors.warning,
                 fontSize: 11,
               ),
             ),
@@ -662,14 +784,14 @@ class _FileDownloadTile extends StatelessWidget {
                 if (state?.hashVerified == true) ...[
                   const Icon(
                     Icons.verified_rounded,
-                    color: Color(0xFF4CAF50),
+                    color: AppColors.success,
                     size: 14,
                   ),
                   const SizedBox(width: 4),
                   const Text(
                     'SHA-256 verified',
                     style: TextStyle(
-                      color: Color(0xFF4CAF50),
+                      color: AppColors.success,
                       fontSize: 11,
                     ),
                   ),
@@ -682,7 +804,8 @@ class _FileDownloadTile extends StatelessWidget {
                   const SizedBox(width: 4),
                   const Text(
                     'Saved',
-                    style: TextStyle(color: Colors.white38, fontSize: 11),
+                    style:
+                        TextStyle(color: Colors.white38, fontSize: 11),
                   ),
                 ],
               ],
@@ -732,11 +855,11 @@ class _FileDownloadTile extends StatelessWidget {
   Color _iconColor(_DownloadStatus status) {
     switch (status) {
       case _DownloadStatus.completed:
-        return const Color(0xFF4CAF50);
+        return AppColors.success;
       case _DownloadStatus.failed:
         return Colors.redAccent;
       default:
-        return const Color(0xFF3F8CFF);
+        return AppColors.primaryDark;
     }
   }
 
@@ -748,7 +871,7 @@ class _FileDownloadTile extends StatelessWidget {
           onPressed: onDownload,
           icon: const Icon(
             Icons.download_rounded,
-            color: Color(0xFF3F8CFF),
+            color: AppColors.primaryDark,
           ),
         );
       case _DownloadStatus.downloading:
@@ -762,7 +885,7 @@ class _FileDownloadTile extends StatelessWidget {
       case _DownloadStatus.completed:
         return const Icon(
           Icons.check_rounded,
-          color: Color(0xFF4CAF50),
+          color: AppColors.success,
           size: 22,
         );
     }

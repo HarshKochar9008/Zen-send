@@ -14,6 +14,9 @@ class AppConstants {
   // Transfer TTL
   static const transferTtlHours = 24;
 
+  // Pagination
+  static const transfersPageSize = 50;
+
   // SharedPreferences keys
   static const prefShortCode = 'short_code';
   static const prefUserDbId = 'user_db_id';

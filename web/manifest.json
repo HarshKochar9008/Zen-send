@@ -1,6 +1,6 @@
 {
-    "name": "neosapien_share",
-    "short_name": "neosapien_share",
+    "name": "ZenSend_share",
+    "short_name": "ZenSend_share",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
