@@ -1,0 +1,48 @@
+name: neosapien_share
+description: Real-time cross-device file sharing app.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Backend
+  supabase_flutter: ^2.3.4
+
+  # File picking & handling
+  file_picker: ^11.0.2
+  mime: ^2.0.0
+  path_provider: ^2.1.3
+  open_file: ^3.3.2
+
+  # Save to gallery (Android MediaStore + iOS Photos)
+  gal: ^2.3.0
+
+  # Permissions
+  permission_handler: ^12.0.1
+
+  # Local storage for identity persistence
+  shared_preferences: ^2.2.3
+
+  # SHA-256 checksum for file integrity
+  crypto: ^3.0.3
+
+  # UUID for transfer IDs
+  uuid: ^4.3.3
+
+  # URL launcher for web downloads
+  url_launcher: ^6.2.5
+
+  cupertino_icons: ^1.0.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
