@@ -2,32 +2,32 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/native/native_share.dart';
 import '../../core/theme.dart';
-import '../../features/identity/identity_service.dart';
-import '../../features/send/send_screen.dart';
-import '../../features/receive/receive_screen.dart';
+import '../identity/identity_service.dart';
+import '../send/send_screen.dart';
 import '../transfer/transfer_service.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final UserIdentity identity;
+  const HomeScreen({super.key, required this.identity});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
-  UserIdentity? _identity;
-  bool _loading = true;
-  String? _error;
   bool _isOnline = true;
-  List<Map<String, dynamic>>? _sentHistory;
+  int _fileCount = 0;
+  int _storageUsedBytes = 0;
+  static const int _storageMaxBytes = 50 * 1024 * 1024 * 1024; // 50 GB
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _checkConnectivity();
-    _loadIdentity();
+    _loadStats();
   }
 
   @override
@@ -40,7 +40,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _checkConnectivity();
-      if (_identity != null) _loadSentHistory();
+      _loadStats();
     }
   }
 
@@ -48,482 +48,470 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     try {
       final result = await Connectivity().checkConnectivity();
       if (mounted) {
-        setState(() {
-          _isOnline = !result.contains(ConnectivityResult.none);
-        });
+        setState(() => _isOnline = !result.contains(ConnectivityResult.none));
       }
     } catch (_) {}
   }
 
-  Future<void> _loadIdentity() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  Future<void> _loadStats() async {
     try {
-      final identity = await IdentityService.initialize();
-      if (mounted) {
+      final history = await TransferService.getSentTransfers(
+        widget.identity.id,
+        page: 0,
+      );
+      if (mounted && history.isNotEmpty) {
+        int totalFiles = 0;
+        int totalBytes = 0;
+        for (final t in history) {
+          final files = t['file_count'] as int? ?? 1;
+          final bytes = t['total_size'] as int? ?? 0;
+          totalFiles += files;
+          totalBytes += bytes;
+        }
         setState(() {
-          _identity = identity;
-          _loading = false;
+          _fileCount = totalFiles > 0 ? totalFiles : history.length;
+          _storageUsedBytes = totalBytes;
         });
-        _loadSentHistory();
-      }
-    } on AuthFailedException catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = e.message;
-          _loading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = 'Could not connect. Check your internet and try again.';
-          _loading = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _loadSentHistory() async {
-    if (_identity == null) return;
-    try {
-      final history =
-          await TransferService.getSentTransfers(_identity!.id, page: 0);
-      if (mounted) {
-        setState(() => _sentHistory = history);
       }
     } catch (_) {}
   }
 
   void _copyCode() {
-    if (_identity == null) return;
-    Clipboard.setData(ClipboardData(text: _identity!.shortCode));
+    Clipboard.setData(ClipboardData(text: widget.identity.shortCode));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: const Text('Code copied'),
+        content: const Text('Code copied to clipboard'),
         duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
-        backgroundColor: AppColors.surfaceContainerHigh,
+        backgroundColor: AppColors.snackBarBg,
       ),
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: _loading
-            ? const _LoadingView()
-            : _error != null
-                ? _ErrorView(message: _error!, onRetry: _loadIdentity)
-                : _HomeBody(
-                    identity: _identity!,
-                    onCopyCode: _copyCode,
-                    isOnline: _isOnline,
-                    sentHistory: _sentHistory,
-                  ),
-      ),
+  void _shareCode() {
+    NativeShareService.shareText(
+      'Send me files on ZenSend using my code: ${widget.identity.shortCode}',
+      subject: 'ZenSend invite',
     );
   }
-}
 
-class _LoadingView extends StatelessWidget {
-  const _LoadingView();
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            width: 24,
-            height: 24,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: AppColors.primary.withValues(alpha: 0.6),
-            ),
-          ),
-          const SizedBox(height: 24),
-          const Text(
-            'Setting up...',
-            style: TextStyle(
-              color: AppColors.onSurfaceVariant,
-              fontSize: 14,
-              letterSpacing: -0.02,
-            ),
-          ),
-        ],
-      ),
-    );
+  String _formatStorage(int bytes) {
+    if (bytes <= 0) return '0';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return (bytes / (1024 * 1024 * 1024)).toStringAsFixed(1);
   }
-}
 
-class _ErrorView extends StatelessWidget {
-  final String message;
-  final VoidCallback onRetry;
-
-  const _ErrorView({required this.message, required this.onRetry});
+  String _formatStorageUnit(int bytes) {
+    if (bytes < 1024 * 1024) return 'KB';
+    if (bytes < 1024 * 1024 * 1024) return 'MB';
+    return 'GB';
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(48),
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(Icons.wifi_off_rounded,
-                size: 48, color: AppColors.onSurfaceVariant.withValues(alpha: 0.3)),
+            _buildHeader(),
+            const SizedBox(height: 28),
+            _buildIdentitySection(),
+            const SizedBox(height: 20),
+            _buildSessionCodeCard(),
+            const SizedBox(height: 16),
+            _buildStorageCard(),
             const SizedBox(height: 24),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: AppColors.onSurfaceVariant,
-                fontSize: 14,
-              ),
-            ),
-            const SizedBox(height: 32),
-            FilledButton(onPressed: onRetry, child: const Text('Retry')),
+            _buildSendButton(),
           ],
         ),
       ),
     );
   }
-}
 
-class _HomeBody extends StatelessWidget {
-  final UserIdentity identity;
-  final VoidCallback onCopyCode;
-  final bool isOnline;
-  final List<Map<String, dynamic>>? sentHistory;
+  Widget _buildHeader() {
+    return Row(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Image.asset('assets/logo.png', width: 32, height: 32),
+        ),
+        const SizedBox(width: 10),
+        const Text(
+          'ZenSend',
+          style: TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w700,
+            color: AppColors.onSurface,
+            letterSpacing: -0.4,
+          ),
+        ),
+        const Spacer(),
+        IconButton(
+          onPressed: () {},
+          icon: const Icon(Icons.settings_rounded,
+              color: AppColors.onSurfaceVariant, size: 22),
+        ),
+      ],
+    );
+  }
 
-  const _HomeBody({
-    required this.identity,
-    required this.onCopyCode,
-    required this.isOnline,
-    this.sentHistory,
-  });
+  Widget _buildIdentitySection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'IDENTITY ANCHOR',
+          style: TextStyle(
+            color: AppColors.primary,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.5,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'Personal Short-code',
+                style: TextStyle(
+                  color: AppColors.onSurface,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.5,
+                ),
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: _isOnline
+                    ? AppColors.primary.withValues(alpha: 0.12)
+                    : AppColors.error.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: _isOnline ? AppColors.primary : AppColors.error,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    _isOnline ? 'Ready to Receive' : 'Offline',
+                    style: TextStyle(
+                      color: _isOnline ? AppColors.primary : AppColors.error,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
 
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+  Widget _buildSessionCodeCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: AppColors.cardBg,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color.fromARGB(255, 83, 109, 255).withValues(alpha: 0.9)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 12,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Header
+          Text(
+            'Active Session ID',
+            style: TextStyle(
+              color: AppColors.cardTextSecondary,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Center(
+            child: Text(
+              widget.identity.shortCode,
+              style: const TextStyle(
+                color: AppColors.cardText,
+                fontSize: 42,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 6,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
           Row(
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: Image.asset('assets/logo.png', width: 28, height: 28),
-              ),
-              const SizedBox(width: 10),
-              const Text(
-                'ZenSend',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.onSurface,
-                  letterSpacing: -0.4,
+              Expanded(
+                child: SizedBox(
+                  height: 44,
+                  child: FilledButton.icon(
+                    onPressed: _copyCode,
+                    icon: const Icon(Icons.copy_rounded, size: 16),
+                    label: const Text('Copy'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF3366FF),
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      textStyle: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
                 ),
               ),
-              const Spacer(),
-              Container(
-                width: 6,
-                height: 6,
-                decoration: BoxDecoration(
-                  color: isOnline ? AppColors.success : AppColors.error,
-                  shape: BoxShape.circle,
+              const SizedBox(width: 12),
+              Expanded(
+                child: SizedBox(
+                  height: 44,
+                  child: OutlinedButton.icon(
+                    onPressed: _shareCode,
+                    icon: Icon(Icons.share_rounded,
+                        size: 16, color: AppColors.cardText),
+                    label: Text(
+                      'Share',
+                      style: TextStyle(color: AppColors.cardText),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: const Color.fromARGB(255, 70, 131, 252), width: 1.5),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      textStyle: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ],
           ),
+        ],
+      ),
+    );
+  }
 
-          const SizedBox(height: 36),
+  Widget _buildStorageCard() {
+    final usedDisplay = _formatStorage(_storageUsedBytes);
+    final unit = _formatStorageUnit(_storageUsedBytes);
+    final progress = _storageMaxBytes > 0
+        ? (_storageUsedBytes / _storageMaxBytes).clamp(0.0, 1.0)
+        : 0.0;
 
-          // ── Share code card
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(28),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [
-                  Color(0xFF1E2A3E),
-                  Color(0xFF172030),
-                ],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: AppColors.cardBg,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFF3366FF).withValues(alpha: 0.5)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 12,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text(
+                'Storage Usage',
+                style: TextStyle(
+                  color: AppColors.cardText,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
-              borderRadius: BorderRadius.circular(16),
+              const Spacer(),
+              Icon(Icons.cloud_outlined,
+                  color: const Color(0xFF3366FF), size: 22),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text(
+                usedDisplay,
+                style: const TextStyle(
+                  color: AppColors.cardText,
+                  fontSize: 36,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -1,
+                ),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                unit,
+                style: TextStyle(
+                  color: AppColors.cardTextSecondary,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'of 50GB Used',
+                style: TextStyle(
+                  color: AppColors.cardTextSecondary,
+                  fontSize: 13,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: LinearProgressIndicator(
+              value: progress,
+              minHeight: 8,
+              backgroundColor: const Color(0xFFE5E7EB),
+              valueColor: const AlwaysStoppedAnimation(AppColors.primary),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            decoration: BoxDecoration(
+              border: Border(
+                top: BorderSide(color: AppColors.cardBorder, width: 1),
+              ),
+            ),
+            child: Row(
               children: [
-                Text(
-                  'Your share code',
-                  style: TextStyle(
-                    color: AppColors.onSurfaceVariant.withValues(alpha: 0.6),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    letterSpacing: 0.5,
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Files',
+                        style: TextStyle(
+                          color: AppColors.cardTextSecondary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '$_fileCount',
+                        style: const TextStyle(
+                          color: AppColors.cardText,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Text(
-                      identity.shortCode,
-                      style: const TextStyle(
-                        color: AppColors.onSurface,
-                        fontSize: 36,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 8,
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                    const Spacer(),
-                    GestureDetector(
-                      onTap: onCopyCode,
-                      child: Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.08),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Icon(Icons.copy_rounded,
-                            color: AppColors.primary.withValues(alpha: 0.7),
-                            size: 18),
-                      ),
-                    ),
-                  ],
+                Container(
+                  width: 1,
+                  height: 36,
+                  color: AppColors.cardBorder,
                 ),
-                const SizedBox(height: 12),
-                Text(
-                  'Share this code so others can send you files',
-                  style: TextStyle(
-                    color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
-                    fontSize: 12,
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 20),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Expires In',
+                          style: TextStyle(
+                            color: AppColors.cardTextSecondary,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        const Text(
+                          '24h',
+                          style: TextStyle(
+                            color: AppColors.cardText,
+                            fontSize: 20,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],
             ),
           ),
-
-          const SizedBox(height: 36),
-
-          // ── Action cards
-          _ActionTile(
-            icon: Icons.arrow_upward_rounded,
-            title: 'Send Files',
-            subtitle: 'Enter a code and send media',
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => SendScreen(identity: identity),
-              ),
-            ),
-          ),
-          const SizedBox(height: 10),
-          _ActionTile(
-            icon: Icons.arrow_downward_rounded,
-            title: 'Incoming Files',
-            subtitle: 'View files sent to your code',
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => ReceiveScreen(identity: identity),
-              ),
-            ),
-          ),
-
-          const SizedBox(height: 32),
-
-          // ── Sent history
-          if (sentHistory != null && sentHistory!.isNotEmpty) ...[
-            Text(
-              'Recent',
-              style: TextStyle(
-                color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                letterSpacing: 0.5,
-              ),
-            ),
-            const SizedBox(height: 12),
-            Expanded(
-              child: ListView.separated(
-                itemCount: sentHistory!.length > 5 ? 5 : sentHistory!.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 6),
-                itemBuilder: (context, index) {
-                  final t = sentHistory![index];
-                  final receiverCode =
-                      (t['receiver'] as Map?)?['short_code'] ?? '???';
-                  final status = (t['status'] ?? 'pending') as String;
-                  final createdAt = (t['created_at'] ?? '') as String;
-                  return _SentHistoryTile(
-                    receiverCode: receiverCode,
-                    status: status,
-                    timeAgo: _timeAgo(createdAt),
-                  );
-                },
-              ),
-            ),
-          ] else
-            const Spacer(),
         ],
       ),
     );
   }
 
-  String _timeAgo(String isoDate) {
-    final date = DateTime.tryParse(isoDate);
-    if (date == null) return '';
-    final diff = DateTime.now().toUtc().difference(date);
-    if (diff.inMinutes < 1) return 'Just now';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-    if (diff.inHours < 24) return '${diff.inHours}h ago';
-    return '${diff.inDays}d ago';
-  }
-}
-
-class _SentHistoryTile extends StatelessWidget {
-  final String receiverCode;
-  final String status;
-  final String timeAgo;
-
-  const _SentHistoryTile({
-    required this.receiverCode,
-    required this.status,
-    required this.timeAgo,
-  });
-
-  Color get _statusColor {
-    switch (status) {
-      case 'completed':
-        return AppColors.success;
-      case 'partial':
-        return AppColors.error;
-      case 'failed':
-        return AppColors.error;
-      default:
-        return AppColors.warning;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: AppColors.surfaceContainer,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 4,
-            height: 4,
-            decoration:
-                BoxDecoration(color: _statusColor, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 12),
-          Text(
-            'To $receiverCode',
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-              color: AppColors.onSurface,
-            ),
-          ),
-          const Spacer(),
-          Text(
-            status,
-            style: TextStyle(
-              color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
-              fontSize: 11,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Text(
-            timeAgo,
-            style: TextStyle(
-              color: AppColors.onSurfaceVariant.withValues(alpha: 0.3),
-              fontSize: 11,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ActionTile extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final VoidCallback onTap;
-
-  const _ActionTile({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(20),
+  Widget _buildSendButton() {
+    return SizedBox(
+      width: double.infinity,
+      height: 52,
+      child: DecoratedBox(
         decoration: BoxDecoration(
-          color: AppColors.surfaceContainerHigh,
+          gradient: const LinearGradient(
+            colors: [AppColors.primary, AppColors.primaryContainer],
+            begin: Alignment.centerLeft,
+            end: Alignment.centerRight,
+          ),
           borderRadius: BorderRadius.circular(14),
         ),
-        child: Row(
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: AppColors.primary.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(icon, color: AppColors.primary, size: 20),
+        child: FilledButton.icon(
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => SendScreen(identity: widget.identity),
             ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 15,
-                      color: AppColors.onSurface,
-                      letterSpacing: -0.2,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle,
-                    style: TextStyle(
-                      color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
+          ),
+          icon: const Icon(Icons.send_rounded, size: 18),
+          label: const Text('Send Files'),
+          style: FilledButton.styleFrom(
+            backgroundColor: Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
             ),
-            Icon(Icons.chevron_right_rounded,
-                color: AppColors.outlineVariant.withValues(alpha: 0.5), size: 20),
-          ],
+            textStyle: const TextStyle(
+              fontFamily: 'Inter',
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
         ),
       ),
     );

@@ -1,4 +1,4 @@
-# ZenSend Share
+# ZenSend
 
 Real-time cross-device file sharing app built with Flutter and Supabase for the NeoSapien Flutter Developer Intern Assessment.
 
@@ -119,9 +119,9 @@ lib/
 
 ### File Saving
 
-- **Images / videos** → saved to device gallery via `Gal` (ZenShare album)
+- **Images / videos** → saved to device gallery via `Gal` (ZenSend album)
 - **Other files (Android)** → saved to `/Download/` or external storage with unique naming
-- **Other files (iOS)** → saved to app Documents (`ZenShare/` directory)
+- **Other files (iOS)** → saved to app Documents (`ZenSend/` directory)
 - **Unique file names** — existing files are not overwritten; a `_(1)`, `_(2)` suffix is appended
 - **Permissions** — Android: `permission_handler` resolves the correct permission level automatically based on the device's SDK version (granular media for API 33+, storage for older). iOS: `photosAddOnly` with Info.plist descriptions.
 
@@ -142,7 +142,9 @@ lib/
 
 1. Copy `.env.example` to `.env`
 2. Fill in your Supabase project URL and anon key
-3. Update `lib/core/constants.dart` with the same values
+3. Run with compile-time defines:
+   - `flutter run --dart-define=SUPABASE_URL=... --dart-define=SUPABASE_ANON_KEY=...`
+4. Do not commit secrets. `lib/core/constants.dart` now reads from `--dart-define`.
 
 ### Supabase Configuration
 
@@ -158,6 +160,7 @@ CREATE TABLE users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   auth_uid UUID NOT NULL UNIQUE,
   short_code VARCHAR(8) NOT NULL UNIQUE,
+  fcm_token TEXT,
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -209,6 +212,17 @@ Supabase Dashboard → Storage → New Bucket → Name: `transfers` (set as **pr
 #### 5. Enable Realtime
 
 Supabase Dashboard → Database → Replication → Enable Realtime for the `transfers` table.
+
+#### 5b. Push Notifications (Incoming while app closed)
+
+1. Add Firebase config files:
+   - Android: `android/app/google-services.json`
+   - iOS: `ios/Runner/GoogleService-Info.plist`
+2. Ensure `users.fcm_token` exists (see schema above).
+3. Add a server-side trigger (Edge Function / webhook) that sends an FCM message when a transfer is created for `receiver_id`.
+4. App behavior:
+   - foreground: in-app local notification
+   - background/terminated: OS push notification wakes the app shell and alerts the user
 
 #### 6. RLS Policies (Database Tables)
 
@@ -292,15 +306,25 @@ flutter test
 | API keys | The `supabase_anon_key` is a **public/anonymous key** (not a service role key). Data security is enforced via RLS on the server. |
 | Duplicate delivery | Transfer file IDs persisted to `SharedPreferences` — survives app restarts. |
 
+## Delivery Semantics (Explicit)
+
+- **Recipient offline:** accepted. Upload succeeds to cloud relay, recipient can download later.
+- **Transfer TTL:** 24 hours (`AppConstants.transferTtlHours`). Expired transfers are hidden/marked expired.
+- **Invalid recipient code:** rejected before upload starts with an inline error.
+- **Network drop mid-upload:** client retries automatically (up to 3 attempts). If retries fail, transfer marks file as failed with actionable error text.
+- **Upload/download cancel:** user can cancel in-progress operations from UI.
+- **Storage pressure:** receiver checks free disk space before download; if insufficient, download is blocked with a clear message.
+- **Incoming while app closed:** push notifications via FCM/APNs are integrated. Recipient receives OS notification and opens app to download.
+
 ## Known Limitations
 
 | Area | Limitation | Path to Fix |
 |------|-----------|-------------|
-| Push notifications | Not implemented. Transfers detected via Supabase Realtime (requires app to be open). | Integrate FCM/APNs + Supabase Edge Function webhook |
+| Push notifications backend | Client-side FCM/APNs is integrated. You still need backend trigger logic (Edge Function/DB trigger) to send notifications on new transfer. | Add Supabase Edge Function that sends FCM/APNs using stored device token |
 | Background transfers | Transfers run in the foreground. App kill = failed transfer. | Add `flutter_background_service` or `workmanager` |
 | Supabase Storage limits | Free tier: 50MB/file, 1GB total. Pro plan: 5GB/file. | Upgrade Supabase plan or implement chunked/tus uploads |
 | Resumable uploads | Retry restarts from byte 0, not from last position. | Implement tus protocol or byte-range resume |
-| Platform channels | Pure Flutter/Dart — no native `MethodChannel` code. | Add native hashing, connectivity checks, or file I/O |
+| Platform channels | Native share sheet implemented with `MethodChannel` (`zensend/native_share`) for Android and iOS. | Extend with native file picker (Pigeon) or MediaStore save channel |
 | Server-side TTL | TTL is enforced client-side only (24h cutoff in query). | Add Supabase cron/Edge Function to delete expired files |
 | Certificate pinning | Not implemented — relies on OS trust store. | Add `badCertificateCallback` to HttpClient for production |
 

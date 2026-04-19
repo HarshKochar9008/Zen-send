@@ -115,6 +115,19 @@ class StorageUploadException implements Exception {
   String toString() => 'Upload failed ($statusCode): $details';
 }
 
+class TransferCancellationToken {
+  bool _cancelled = false;
+  bool get isCancelled => _cancelled;
+  void cancel() => _cancelled = true;
+}
+
+class TransferCancelledException implements Exception {
+  final String message;
+  TransferCancelledException([this.message = 'Transfer cancelled by user.']);
+  @override
+  String toString() => message;
+}
+
 // ── SHA-256 helper sink ──────────────────────────────────────────────────────
 
 class _DigestSink implements Sink<Digest> {
@@ -134,6 +147,7 @@ class TransferService {
   static Future<String> computeSha256(
     File file, {
     void Function(int processed, int total)? onProgress,
+    TransferCancellationToken? cancellationToken,
   }) async {
     final fileLength = await file.length();
     final digestSink = _DigestSink();
@@ -141,6 +155,9 @@ class TransferService {
 
     var processed = 0;
     await for (final chunk in file.openRead()) {
+      if (cancellationToken?.isCancelled == true) {
+        throw TransferCancelledException();
+      }
       byteSink.add(chunk);
       processed += chunk.length;
       onProgress?.call(processed, fileLength);
@@ -177,6 +194,7 @@ class TransferService {
     required File file,
     required String contentType,
     void Function(int sent, int total)? onProgress,
+    TransferCancellationToken? cancellationToken,
   }) async {
     await SupabaseConfig.ensureValidSession();
     final session = SupabaseConfig.client.auth.currentSession;
@@ -198,6 +216,9 @@ class TransferService {
 
       var bytesSent = 0;
       final progressStream = file.openRead().map((chunk) {
+        if (cancellationToken?.isCancelled == true) {
+          throw TransferCancelledException();
+        }
         bytesSent += chunk.length;
         onProgress?.call(bytesSent, fileLength);
         return chunk;
@@ -222,6 +243,7 @@ class TransferService {
     required String receiverId,
     required List<PlatformFile> files,
     required void Function(List<FileUploadProgress> states) onProgress,
+    TransferCancellationToken? cancellationToken,
   }) async {
     await SupabaseConfig.ensureValidSession();
     final client = SupabaseConfig.client;
@@ -255,6 +277,9 @@ class TransferService {
 
     try {
       for (var i = 0; i < files.length; i++) {
+        if (cancellationToken?.isCancelled == true) {
+          throw TransferCancelledException();
+        }
         final file = files[i];
         final filePath = file.path;
 
@@ -287,7 +312,10 @@ class TransferService {
 
         String hash;
         try {
-          hash = await computeSha256(diskFile, onProgress: (p, t) {
+          hash = await computeSha256(
+            diskFile,
+            cancellationToken: cancellationToken,
+            onProgress: (p, t) {
             if (t > 0) {
               states = _updateState(
                 states,
@@ -296,8 +324,10 @@ class TransferService {
               );
               onProgress(states);
             }
-          });
+            },
+          );
         } catch (e) {
+          if (e is TransferCancelledException) rethrow;
           states = _updateState(
             states,
             i,
@@ -338,6 +368,7 @@ class TransferService {
               storagePath: storagePath,
               file: diskFile,
               contentType: mimeType,
+              cancellationToken: cancellationToken,
               onProgress: (sent, total) {
                 if (total > 0) {
                   states = _updateState(
@@ -362,6 +393,7 @@ class TransferService {
             uploaded = true;
             break;
           } catch (e) {
+            if (e is TransferCancelledException) rethrow;
             lastError = e.toString().replaceAll('Exception: ', '');
             if (attempt < _maxRetries) {
               await Future.delayed(Duration(seconds: attempt * 2));
@@ -549,6 +581,7 @@ class TransferService {
     required String storagePath,
     required String fileName,
     required void Function(int received, int total) onProgress,
+    TransferCancellationToken? cancellationToken,
   }) async {
     await SupabaseConfig.ensureValidSession();
     final url = await SupabaseConfig.client.storage
@@ -571,6 +604,13 @@ class TransferService {
       final sink = file.openWrite();
 
       await for (final chunk in response) {
+        if (cancellationToken?.isCancelled == true) {
+          await sink.close();
+          if (await file.exists()) {
+            await file.delete();
+          }
+          throw TransferCancelledException();
+        }
         sink.add(chunk);
         receivedBytes += chunk.length;
         // Guard against -1 content length (chunked transfer encoding)

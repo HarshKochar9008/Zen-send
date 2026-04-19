@@ -1,7 +1,12 @@
 class AppConstants {
-  static const supabaseUrl = 'https://ontlldqoqeanaeodlxah.supabase.co';
-  static const supabaseAnonKey =
-      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9udGxsZHFvcWVhbmFlb2RseGFoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NTM2NjEsImV4cCI6MjA5MjAyOTY2MX0.V7-lRSMu6pSTNBz4IXVKI1hL3D19JjeOFTrcENegGbo';
+  static final supabaseUrl = const String.fromEnvironment(
+    'SUPABASE_URL',
+    defaultValue: '',
+  );
+  static final supabaseAnonKey = const String.fromEnvironment(
+    'SUPABASE_ANON_KEY',
+    defaultValue: '',
+  );
 
   // Short code alphabet — ambiguous chars excluded (O, 0, I, 1, L)
   static const codeAlphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';

@@ -1,43 +1,83 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class AppColors {
-  // Zenith Void — "The Silent Curator" design system by Stitch
-  static const primary = Color(0xFFA6C8FD);
-  static const primaryContainer = Color(0xFF7092C4);
-  static const onPrimary = Color(0xFF02315D);
+  static const primary = Color(0xFF3366FF);
+  static const primaryLight = Color(0xFF5B8AFF);
+  static const primaryContainer = Color(0xFF1A3DB8);
+  static const onPrimary = Color(0xFFFFFFFF);
 
-  static const secondary = Color(0xFF88D7A6);
-  static const secondaryContainer = Color(0xFF005F38);
+  static const secondary = Color(0xFF2E7D4F);
+  static const secondaryContainer = Color(0xFFD4EDDA);
 
-  static const tertiary = Color(0xFFF8BB73);
-  static const tertiaryContainer = Color(0xFFBB8644);
+  static const tertiary = Color(0xFFD4880F);
+  static const tertiaryContainer = Color(0xFFFFF3CD);
 
-  static const scaffold = Color(0xFF0E0E13);
-  static const surface = Color(0xFF131318);
-  static const surfaceContainerLowest = Color(0xFF0E0E13);
-  static const surfaceContainerLow = Color(0xFF1B1B20);
-  static const surfaceContainer = Color(0xFF1F1F25);
-  static const surfaceContainerHigh = Color(0xFF2A292F);
-  static const surfaceContainerHighest = Color(0xFF35343A);
-  static const surfaceBright = Color(0xFF39383E);
+  static const scaffold = Color(0xFFF7F8FA);
+  static const surface = Color(0xFFFFFFFF);
+  static const surfaceContainerLowest = Color(0xFFFFFFFF);
+  static const surfaceContainerLow = Color(0xFFF5F6F8);
+  static const surfaceContainer = Color(0xFFF0F1F4);
+  static const surfaceContainerHigh = Color(0xFFF3F4F6);
+  static const surfaceContainerHighest = Color(0xFFE5E7EB);
+  static const surfaceBright = Color(0xFFFFFFFF);
 
-  static const onSurface = Color(0xFFE4E1E9);
-  static const onSurfaceVariant = Color(0xFFC3C6D0);
-  static const outline = Color(0xFF8D919A);
-  static const outlineVariant = Color(0xFF43474F);
+  static const onSurface = Color(0xFF111827);
+  static const onSurfaceVariant = Color(0xFF6B7280);
+  static const outline = Color(0xFF9CA3AF);
+  static const outlineVariant = Color(0xFFE5E7EB);
 
-  static const success = Color(0xFF88D7A6);
-  static const warning = Color(0xFFF8BB73);
-  static const error = Color(0xFFFFB4AB);
+  static const success = Color(0xFF16A34A);
+  static const warning = Color(0xFFD97706);
+  static const error = Color(0xFFDC2626);
 
-  static const dialogBg = Color(0xFF1F1F25);
+  static const dialogBg = Color(0xFFFFFFFF);
+
+  static const cardBg = Color(0xFFFFFFFF);
+  static const cardText = Color(0xFF111827);
+  static const cardTextSecondary = Color(0xFF6B7280);
+  static const cardBorder = Color(0xFFE5E7EB);
+
+  static const navBarBg = Color(0xFFFFFFFF);
+
+  static const snackBarBg = Color(0xFF1F2937);
+  static const snackBarText = Color(0xFFFFFFFF);
+}
+
+class ThemeController {
+  static const _themeModeKey = 'theme_mode';
+  static final ValueNotifier<ThemeMode> themeMode =
+      ValueNotifier<ThemeMode>(ThemeMode.light);
+
+  static Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedMode = prefs.getString(_themeModeKey);
+    switch (savedMode) {
+      case 'dark':
+        themeMode.value = ThemeMode.dark;
+        break;
+      case 'system':
+        themeMode.value = ThemeMode.system;
+        break;
+      case 'light':
+      default:
+        themeMode.value = ThemeMode.light;
+    }
+  }
+
+  static Future<void> setThemeMode(ThemeMode mode) async {
+    themeMode.value = mode;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_themeModeKey, mode.name);
+  }
 }
 
 ThemeData buildAppTheme() {
   return ThemeData(
     colorScheme: ColorScheme.fromSeed(
       seedColor: AppColors.primary,
-      brightness: Brightness.dark,
+      brightness: Brightness.light,
       surface: AppColors.surface,
       onSurface: AppColors.onSurface,
       primary: AppColors.primary,
@@ -55,6 +95,11 @@ ThemeData buildAppTheme() {
       backgroundColor: Colors.transparent,
       elevation: 0,
       centerTitle: false,
+      systemOverlayStyle: SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+        statusBarBrightness: Brightness.light,
+      ),
       titleTextStyle: TextStyle(
         fontFamily: 'Inter',
         fontSize: 18,
@@ -90,10 +135,10 @@ ThemeData buildAppTheme() {
     ),
     snackBarTheme: const SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
-      backgroundColor: AppColors.surfaceContainerHigh,
+      backgroundColor: AppColors.snackBarBg,
       contentTextStyle: TextStyle(
         fontFamily: 'Inter',
-        color: AppColors.onSurface,
+        color: AppColors.snackBarText,
         fontSize: 13,
       ),
       shape: RoundedRectangleBorder(
@@ -102,7 +147,29 @@ ThemeData buildAppTheme() {
     ),
     progressIndicatorTheme: const ProgressIndicatorThemeData(
       color: AppColors.primary,
-      linearTrackColor: Color(0x1AFFFFFF),
+      linearTrackColor: Color(0x1A000000),
+    ),
+  );
+}
+
+ThemeData buildDarkAppTheme() {
+  return ThemeData(
+    colorScheme: ColorScheme.fromSeed(
+      seedColor: AppColors.primary,
+      brightness: Brightness.dark,
+    ),
+    useMaterial3: true,
+    fontFamily: 'Inter',
+    scaffoldBackgroundColor: const Color(0xFF0B1220),
+    appBarTheme: const AppBarTheme(
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      centerTitle: false,
+      systemOverlayStyle: SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.light,
+        statusBarBrightness: Brightness.dark,
+      ),
     ),
   );
 }

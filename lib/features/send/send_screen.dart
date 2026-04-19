@@ -1,6 +1,7 @@
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:mime/mime.dart';
 
 import '../../core/constants.dart';
 import '../../core/theme.dart';
@@ -20,9 +21,12 @@ class _SendScreenState extends State<SendScreen> {
   List<PlatformFile> _selectedFiles = [];
   List<FileUploadProgress>? _uploadStates;
   bool _validatingCode = false;
+  bool _codeValidated = false;
   bool _sending = false;
   String? _error;
   String? _codeError;
+  String? _validatedRecipientId;
+  TransferCancellationToken? _uploadCancellationToken;
 
   @override
   void dispose() {
@@ -111,11 +115,17 @@ class _SendScreenState extends State<SendScreen> {
     });
   }
 
+  void _clearAll() {
+    setState(() {
+      _selectedFiles = [];
+    });
+  }
+
   void _showDuplicateAlert(List<String> fileNames) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.dialogBg,
+        backgroundColor: AppColors.cardBg,
         shape:
             RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
@@ -174,7 +184,7 @@ class _SendScreenState extends State<SendScreen> {
     );
   }
 
-  Future<void> _send() async {
+  Future<void> _validateCode() async {
     final code = _codeController.text.trim().toUpperCase();
     if (code.isEmpty) {
       setState(() => _codeError = 'Enter a recipient code');
@@ -184,56 +194,60 @@ class _SendScreenState extends State<SendScreen> {
       setState(() => _codeError = 'You cannot send files to yourself');
       return;
     }
-    if (_selectedFiles.isEmpty) {
-      setState(() => _error = 'Pick at least one file');
-      return;
-    }
 
     if (!await _hasConnectivity()) {
-      setState(() => _error = 'No internet connection. Please try again.');
+      setState(() => _codeError = 'No internet connection');
       return;
     }
 
     setState(() {
       _validatingCode = true;
       _codeError = null;
-      _error = null;
     });
 
-    Map<String, dynamic>? recipient;
     try {
-      recipient = await IdentityService.findUserByCode(code);
-    } catch (e) {
+      final recipient = await IdentityService.findUserByCode(code);
+      if (!mounted) return;
+
+      if (recipient == null) {
+        setState(() {
+          _codeError = 'No user found with code "$code"';
+          _validatingCode = false;
+        });
+        return;
+      }
+
+      setState(() {
+        _validatingCode = false;
+        _codeValidated = true;
+        _validatedRecipientId = recipient['id'] as String;
+      });
+    } catch (_) {
       if (mounted) {
         setState(() {
           _codeError = 'Could not validate code. Check your connection.';
           _validatingCode = false;
         });
       }
-      return;
     }
+  }
 
-    if (recipient == null) {
-      if (mounted) {
-        setState(() {
-          _codeError = 'No user found with code "$code"';
-          _validatingCode = false;
-        });
-      }
-      return;
-    }
+  Future<void> _send() async {
+    if (_validatedRecipientId == null || _selectedFiles.isEmpty) return;
 
     setState(() {
-      _validatingCode = false;
       _sending = true;
       _uploadStates = null;
+      _error = null;
+      _uploadCancellationToken = TransferCancellationToken();
     });
 
     try {
       final result = await TransferService.sendFiles(
         senderId: widget.identity.id,
-        receiverId: recipient['id'] as String,
+        receiverId: _validatedRecipientId!,
         files: _selectedFiles,
+        cancellationToken: _uploadCancellationToken,
         onProgress: (states) {
           if (mounted) setState(() => _uploadStates = states);
         },
@@ -244,9 +258,10 @@ class _SendScreenState extends State<SendScreen> {
       if (result.success) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('${result.completedFiles} file(s) sent to $code'),
+            content: Text(
+                '${result.completedFiles} file(s) sent successfully'),
             behavior: SnackBarBehavior.floating,
-            backgroundColor: AppColors.surfaceContainerHigh,
+            backgroundColor: AppColors.snackBarBg,
           ),
         );
         Navigator.pop(context);
@@ -255,6 +270,13 @@ class _SendScreenState extends State<SendScreen> {
           _error =
               '${result.completedFiles}/${result.totalFiles} files sent. '
               'Some failed — see details above.';
+          _sending = false;
+        });
+      }
+    } on TransferCancelledException catch (_) {
+      if (mounted) {
+        setState(() {
+          _error = 'Transfer cancelled';
           _sending = false;
         });
       }
@@ -281,185 +303,367 @@ class _SendScreenState extends State<SendScreen> {
           _sending = false;
         });
       }
+    } finally {
+      _uploadCancellationToken = null;
     }
+  }
+
+  void _cancelUpload() {
+    _uploadCancellationToken?.cancel();
   }
 
   String _formatSize(int bytes) {
     return TransferService.formatFileSize(bytes);
   }
 
+  int get _totalSize =>
+      _selectedFiles.fold<int>(0, (sum, f) => sum + f.size);
+
+  String _mimeCategory(String fileName) {
+    final mime = lookupMimeType(fileName) ?? '';
+    if (mime.startsWith('image/')) return 'Image';
+    if (mime.startsWith('video/')) return 'Video';
+    if (mime.startsWith('audio/')) return 'Audio';
+    if (mime.contains('pdf')) return 'PDF';
+    if (mime.contains('zip') || mime.contains('tar') || mime.contains('rar')) {
+      return 'Archive';
+    }
+    if (mime.contains('document') ||
+        mime.contains('word') ||
+        mime.contains('text/')) {
+      return 'Document';
+    }
+    return 'File';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Send Files')),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
+      body: SafeArea(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Recipient code
-            Text(
-              'Recipient Code',
-              style: TextStyle(
-                color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                letterSpacing: 0.5,
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _codeController,
-              enabled: !_sending,
-              textCapitalization: TextCapitalization.characters,
-              maxLength: AppConstants.codeLength,
-              style: const TextStyle(
-                fontSize: 24,
-                letterSpacing: 8,
-                fontWeight: FontWeight.w700,
-                fontFamily: 'monospace',
-                color: AppColors.onSurface,
-              ),
-              decoration: InputDecoration(
-                hintText: 'ABC123',
-                hintStyle: TextStyle(
-                  color: AppColors.outlineVariant.withValues(alpha: 0.4),
-                  fontSize: 24,
-                  letterSpacing: 8,
-                  fontFamily: 'monospace',
-                ),
-                counterText: '',
-                filled: true,
-                fillColor: AppColors.surfaceContainerLowest,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide.none,
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(
-                    color: AppColors.primary.withValues(alpha: 0.2),
+            // Header
+            Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              child: Row(
+                children: [
+                  GestureDetector(
+                    onTap: () => Navigator.pop(context),
+                    child: const Icon(Icons.arrow_back_rounded,
+                        color: AppColors.onSurfaceVariant, size: 22),
                   ),
-                ),
-                errorText: _codeError,
-                errorStyle: const TextStyle(fontSize: 12),
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 20,
-                  vertical: 18,
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 28),
-
-            // ── Files header
-            Row(
-              children: [
-                Text(
-                  'Files',
-                  style: TextStyle(
-                    color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    letterSpacing: 0.5,
+                  const SizedBox(width: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Image.asset('assets/logo.png',
+                        width: 32, height: 32),
                   ),
-                ),
-                const Spacer(),
-                if (!_sending)
-                  TextButton.icon(
-                    onPressed: _pickFiles,
-                    icon: const Icon(Icons.add_rounded, size: 16),
-                    label: Text(
-                      _selectedFiles.isEmpty ? 'Pick Files' : 'Add More',
+                  const SizedBox(width: 10),
+                  const Text(
+                    'ZenSend',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.onSurface,
+                      letterSpacing: -0.4,
                     ),
                   ),
-              ],
+                  const Spacer(),
+                  IconButton(
+                    onPressed: () {},
+                    icon: const Icon(Icons.settings_rounded,
+                        color: AppColors.onSurfaceVariant, size: 22),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 8),
 
-            // ── File list / progress view
+            // Content
             Expanded(
-              child: _sending && _uploadStates != null
-                  ? _UploadProgressList(states: _uploadStates!)
-                  : _selectedFiles.isEmpty
-                      ? _EmptyFilesView(onPick: _pickFiles)
-                      : ListView.separated(
-                          itemCount: _selectedFiles.length,
-                          separatorBuilder: (_, __) =>
-                              const SizedBox(height: 8),
-                          itemBuilder: (context, index) {
-                            final file = _selectedFiles[index];
-                            return _FileTile(
-                              name: file.name,
-                              size: _formatSize(file.size),
-                              onRemove: _sending
-                                  ? null
-                                  : () => _removeFile(index),
-                            );
-                          },
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Ready to Send',
+                      style: TextStyle(
+                        color: AppColors.onSurface,
+                        fontSize: 24,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.5,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      "Enter the recipient's secure short-code to begin the encrypted handshake.",
+                      style: TextStyle(
+                        color:
+                            AppColors.onSurfaceVariant.withValues(alpha: 0.6),
+                        fontSize: 14,
+                        height: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+
+                    // Recipient code input card
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: AppColors.cardBg,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: AppColors.cardBorder.withValues(alpha: 0.6)),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _codeController,
+                              enabled: !_sending && !_codeValidated,
+                              textCapitalization:
+                                  TextCapitalization.characters,
+                              maxLength: AppConstants.codeLength,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                letterSpacing: 4,
+                                fontWeight: FontWeight.w700,
+                                fontFamily: 'monospace',
+                                color: AppColors.cardText,
+                              ),
+                              decoration: InputDecoration(
+                                hintText: 'RECIPIENT SHORTCODE',
+                                hintStyle: TextStyle(
+                                  color: AppColors.cardTextSecondary
+                                      .withValues(alpha: 0.5),
+                                  fontSize: 13,
+                                  letterSpacing: 1,
+                                  fontFamily: 'Inter',
+                                  fontWeight: FontWeight.w500,
+                                ),
+                                counterText: '',
+                                border: InputBorder.none,
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 14,
+                                ),
+                              ),
+                              onChanged: (_) {
+                                if (_codeValidated) {
+                                  setState(() {
+                                    _codeValidated = false;
+                                    _validatedRecipientId = null;
+                                  });
+                                }
+                              },
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.only(right: 4),
+                            child: SizedBox(
+                              height: 40,
+                              child: FilledButton(
+                                onPressed: (_validatingCode ||
+                                        _sending ||
+                                        _codeValidated)
+                                    ? null
+                                    : _validateCode,
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: _codeValidated
+                                      ? AppColors.success
+                                      : AppColors.primary,
+                                  disabledBackgroundColor: _codeValidated
+                                      ? AppColors.success
+                                      : AppColors.primary
+                                          .withValues(alpha: 0.5),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 20),
+                                  textStyle: const TextStyle(
+                                    fontFamily: 'Inter',
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                child: _validatingCode
+                                    ? const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white,
+                                        ),
+                                      )
+                                    : Text(
+                                        _codeValidated
+                                            ? 'Verified'
+                                            : 'Validate',
+                                        style: const TextStyle(
+                                            color: Colors.white),
+                                      ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    if (_codeError != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        _codeError!,
+                        style: const TextStyle(
+                            color: AppColors.error, fontSize: 12),
+                      ),
+                    ],
+
+                    const SizedBox(height: 28),
+
+                    // Selected files section
+                    Row(
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Selected Files',
+                              style: TextStyle(
+                                color: AppColors.onSurface,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            if (_selectedFiles.isNotEmpty)
+                              Text(
+                                '${_selectedFiles.length} files, ${_formatSize(_totalSize)}',
+                                style: TextStyle(
+                                  color: AppColors.primary,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                          ],
                         ),
+                        const Spacer(),
+                        if (!_sending && _selectedFiles.isNotEmpty) ...[
+                          TextButton(
+                            onPressed: _pickFiles,
+                            child: const Text('Add More'),
+                          ),
+                          TextButton(
+                            onPressed: _clearAll,
+                            child: Text(
+                              'Clear All',
+                              style: TextStyle(
+                                color: AppColors.primary,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+
+                    // File list or upload progress
+                    if (_sending && _uploadStates != null)
+                      _UploadProgressList(states: _uploadStates!)
+                    else if (_selectedFiles.isEmpty)
+                      _EmptyFilesView(onPick: _pickFiles)
+                    else
+                      ...List.generate(_selectedFiles.length, (index) {
+                        final file = _selectedFiles[index];
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: _FileTile(
+                            name: file.name,
+                            size: _formatSize(file.size),
+                            mimeType: _mimeCategory(file.name),
+                            onRemove:
+                                _sending ? null : () => _removeFile(index),
+                          ),
+                        );
+                      }),
+
+                    if (_error != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        _error!,
+                        style: const TextStyle(
+                            color: AppColors.error, fontSize: 12),
+                      ),
+                    ],
+
+                    const SizedBox(height: 20),
+                  ],
+                ),
+              ),
             ),
 
-            // ── Error
-            if (_error != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                _error!,
-                style: const TextStyle(color: AppColors.error, fontSize: 12),
-              ),
-            ],
-
-            const SizedBox(height: 16),
-
-            // ── Send button
-            SizedBox(
-              width: double.infinity,
-              height: 52,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: (_sending || _validatingCode)
-                      ? null
-                      : const LinearGradient(
-                          colors: [AppColors.primary, AppColors.primaryContainer],
-                          begin: Alignment.centerLeft,
-                          end: Alignment.centerRight,
-                        ),
-                  color: (_sending || _validatingCode)
-                      ? AppColors.surfaceContainerHigh
-                      : null,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: FilledButton(
-                  onPressed: (_sending || _validatingCode) ? null : _send,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Colors.transparent,
-                    disabledBackgroundColor: Colors.transparent,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+            // Send button
+            if (_codeValidated && _selectedFiles.isNotEmpty)
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: _sending
+                          ? null
+                          : const LinearGradient(
+                              colors: [
+                                AppColors.primary,
+                                AppColors.primaryContainer
+                              ],
+                              begin: Alignment.centerLeft,
+                              end: Alignment.centerRight,
+                            ),
+                      color: _sending
+                          ? AppColors.outlineVariant
+                          : null,
+                      borderRadius: BorderRadius.circular(14),
                     ),
-                  ),
-                  child: _sending
-                      ? _buildSendingLabel()
-                      : _validatingCode
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: AppColors.onSurfaceVariant,
-                              ),
+                    child: FilledButton(
+                      onPressed: _sending ? null : _send,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.transparent,
+                        disabledBackgroundColor: Colors.transparent,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: _sending
+                          ? Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                _buildSendingLabel(),
+                                const SizedBox(width: 10),
+                                GestureDetector(
+                                  onTap: _cancelUpload,
+                                  child: const Icon(
+                                    Icons.close_rounded,
+                                    color: AppColors.onSurfaceVariant,
+                                    size: 18,
+                                  ),
+                                ),
+                              ],
                             )
                           : const Text(
                               'Send',
                               style: TextStyle(
-                                fontSize: 15,
+                                fontSize: 16,
                                 fontWeight: FontWeight.w600,
-                                color: AppColors.onPrimary,
+                                color: Colors.white,
                               ),
                             ),
+                    ),
+                  ),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -494,7 +698,8 @@ class _SendScreenState extends State<SendScreen> {
         const SizedBox(width: 12),
         Text(
           'Sending $done / ${states.length}',
-          style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 13),
+          style: const TextStyle(
+              color: AppColors.onSurfaceVariant, fontSize: 13),
         ),
       ],
     );
@@ -536,14 +741,10 @@ class _UploadProgressList extends StatelessWidget {
             ],
           ),
         ),
-        Expanded(
-          child: ListView.separated(
-            itemCount: states.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
-            itemBuilder: (context, index) =>
-                _FileProgressTile(state: states[index]),
-          ),
-        ),
+        ...states.map((s) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: _FileProgressTile(state: s),
+            )),
       ],
     );
   }
@@ -558,8 +759,9 @@ class _FileProgressTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: AppColors.surfaceContainer,
+        color: AppColors.cardBg,
         borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.cardBorder.withValues(alpha: 0.6)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -594,7 +796,8 @@ class _FileProgressTile extends StatelessWidget {
               borderRadius: BorderRadius.circular(3),
               child: LinearProgressIndicator(
                 value: state.progress,
-                backgroundColor: AppColors.outlineVariant.withValues(alpha: 0.15),
+                backgroundColor:
+                    AppColors.outlineVariant.withValues(alpha: 0.15),
                 valueColor: AlwaysStoppedAnimation(_statusColor()),
                 minHeight: 3,
               ),
@@ -699,11 +902,13 @@ class _EmptyFilesView extends StatelessWidget {
     return GestureDetector(
       onTap: onPick,
       child: Container(
+        height: 160,
         decoration: BoxDecoration(
-          color: AppColors.surfaceContainerLowest,
-          borderRadius: BorderRadius.circular(14),
+          color: AppColors.cardBg,
+          borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: AppColors.outlineVariant.withValues(alpha: 0.15),
+            color: AppColors.cardBorder,
+            width: 1.5,
           ),
         ),
         child: Center(
@@ -712,12 +917,14 @@ class _EmptyFilesView extends StatelessWidget {
             children: [
               Icon(Icons.cloud_upload_outlined,
                   size: 40,
-                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.2)),
+                  color:
+                      AppColors.onSurfaceVariant.withValues(alpha: 0.2)),
               const SizedBox(height: 16),
               Text(
                 'Tap to select files',
                 style: TextStyle(
-                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                  color:
+                      AppColors.onSurfaceVariant.withValues(alpha: 0.4),
                   fontSize: 14,
                 ),
               ),
@@ -725,7 +932,8 @@ class _EmptyFilesView extends StatelessWidget {
               Text(
                 'Images, videos, documents — any file type',
                 style: TextStyle(
-                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.25),
+                  color:
+                      AppColors.onSurfaceVariant.withValues(alpha: 0.25),
                   fontSize: 11,
                 ),
               ),
@@ -740,22 +948,55 @@ class _EmptyFilesView extends StatelessWidget {
 class _FileTile extends StatelessWidget {
   final String name;
   final String size;
+  final String mimeType;
   final VoidCallback? onRemove;
 
-  const _FileTile({required this.name, required this.size, this.onRemove});
+  const _FileTile({
+    required this.name,
+    required this.size,
+    required this.mimeType,
+    this.onRemove,
+  });
+
+  IconData get _typeIcon {
+    switch (mimeType) {
+      case 'Image':
+        return Icons.image_rounded;
+      case 'Video':
+        return Icons.videocam_rounded;
+      case 'Audio':
+        return Icons.audiotrack_rounded;
+      case 'PDF':
+        return Icons.picture_as_pdf_rounded;
+      case 'Archive':
+        return Icons.folder_zip_rounded;
+      case 'Document':
+        return Icons.description_rounded;
+      default:
+        return Icons.insert_drive_file_rounded;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: AppColors.surfaceContainer,
-        borderRadius: BorderRadius.circular(12),
+        color: AppColors.cardBg,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.cardBorder.withValues(alpha: 0.6)),
       ),
       child: Row(
         children: [
-          Icon(Icons.insert_drive_file_rounded,
-              color: AppColors.primary.withValues(alpha: 0.6), size: 20),
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: AppColors.primary.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(_typeIcon, color: AppColors.primary, size: 22),
+          ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -766,12 +1007,17 @@ class _FileTile extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                      fontSize: 13, color: AppColors.onSurface),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: AppColors.onSurface,
+                  ),
                 ),
+                const SizedBox(height: 2),
                 Text(
-                  size,
+                  '$size • $mimeType',
                   style: TextStyle(
-                    color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                    color:
+                        AppColors.onSurfaceVariant.withValues(alpha: 0.5),
                     fontSize: 11,
                   ),
                 ),
@@ -781,9 +1027,13 @@ class _FileTile extends StatelessWidget {
           if (onRemove != null)
             GestureDetector(
               onTap: onRemove,
-              child: Icon(Icons.close_rounded,
-                  color: AppColors.outlineVariant.withValues(alpha: 0.5),
-                  size: 18),
+              child: Container(
+                padding: const EdgeInsets.all(6),
+                child: Icon(Icons.close_rounded,
+                    color:
+                        AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                    size: 18),
+              ),
             ),
         ],
       ),

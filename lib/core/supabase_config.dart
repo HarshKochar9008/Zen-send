@@ -4,6 +4,12 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'constants.dart';
 
 Future<void> initSupabase() async {
+  if (AppConstants.supabaseUrl.isEmpty || AppConstants.supabaseAnonKey.isEmpty) {
+    throw StateError(
+      'Missing Supabase config. Pass --dart-define=SUPABASE_URL=... '
+      'and --dart-define=SUPABASE_ANON_KEY=...',
+    );
+  }
   await Supabase.initialize(
     url: AppConstants.supabaseUrl,
     anonKey: AppConstants.supabaseAnonKey,
