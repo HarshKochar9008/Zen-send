@@ -216,7 +216,7 @@ Supabase Dashboard → Database → Replication → Enable Realtime for the `tra
 #### 5b. Push Notifications (Incoming while app closed)
 
 1. **Replace** the checked-in Android placeholder with your real Firebase Android app file:
-   - Firebase Console → Project settings → Your apps → Android (`com.ZenSend.share`) → download `google-services.json` → `android/app/google-services.json`
+   - Firebase Console → Project settings → Your apps → Android — the app **package name must match** `applicationId` in `android/app/build.gradle.kts` (currently `com.Zen.app`). Download `google-services.json` → `android/app/google-services.json`.
    - iOS: add `ios/Runner/GoogleService-Info.plist` from the same console (enable Push Notifications + Background Modes → Remote notifications in Xcode).
 2. Ensure `users.fcm_token` exists (see schema above). The app registers `FirebaseMessaging.onBackgroundMessage` **before** `Firebase.initializeApp()`, requests Android 13+ notification permission, creates the `incoming_transfers` channel, shows **data-only** pushes in the background isolate, and merges **notification + data** payloads for deep-linking (`transfer_id`, `sender_code`).
 3. **Deploy the included Edge Function** `supabase/functions/send-transfer-fcm/` (FCM HTTP v1). Set secrets `FCM_PROJECT_ID` and `FCM_SERVICE_ACCOUNT_JSON` (Firebase service account JSON with *Firebase Cloud Messaging API Admin*). Create a **Database Webhook** on `transfers` **INSERT** → `POST` your function URL (see comments in `index.ts`).

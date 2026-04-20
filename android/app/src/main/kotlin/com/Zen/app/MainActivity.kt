@@ -1,4 +1,4 @@
-package com.ZenSend.share
+package com.Zen.app
 
 import android.content.Intent
 import io.flutter.embedding.android.FlutterActivity

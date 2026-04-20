@@ -1,21 +1,21 @@
 {
   "project_info": {
-    "project_number": "100000000001",
-    "project_id": "zensend-placeholder",
-    "storage_bucket": "zensend-placeholder.appspot.com"
+    "project_number": "454168249027",
+    "project_id": "zensend-da43c",
+    "storage_bucket": "zensend-da43c.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:100000000001:android:a1b2c3d4e5f6a7b8c9d0e1f2",
+        "mobilesdk_app_id": "1:454168249027:android:1a50dcafc57eaf2a055876",
         "android_client_info": {
-          "package_name": "com.ZenSend.share"
+          "package_name": "com.Zen.app"
         }
       },
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY12"
+          "current_key": "AIzaSyBFSBrYLyjYCNr-geEnAh672UHnQLfdls4"
         }
       ],
       "services": {

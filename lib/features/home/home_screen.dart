@@ -154,7 +154,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         IconButton(
           onPressed: () {},
           icon: const Icon(Icons.settings_rounded,
-              color: AppColors.onSurfaceVariant, size: 22),
+              color: Color.fromARGB(255, 255, 255, 255), size: 22),
         ),
       ],
     );

@@ -6,6 +6,8 @@ import '../../core/theme.dart';
 import '../identity/identity_service.dart';
 import '../transfer/transfer_service.dart';
 
+enum _HistoryFilter { all, received, sent }
+
 class HistoryScreen extends StatefulWidget {
   final UserIdentity identity;
   const HistoryScreen({super.key, required this.identity});
@@ -21,6 +23,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
   RealtimeChannel? _channel;
   int _currentPage = 0;
   bool _hasMore = true;
+  _HistoryFilter _filter = _HistoryFilter.all;
 
   @override
   void initState() {
@@ -65,15 +68,21 @@ class _HistoryScreenState extends State<HistoryScreen> {
       _currentPage = 0;
     });
     try {
-      final transfers = await TransferService.getIncomingTransfers(
+      final incoming = await TransferService.getIncomingTransfers(
         widget.identity.id,
         page: 0,
       );
+      final sent = await TransferService.getSentTransfers(
+        widget.identity.id,
+        page: 0,
+      );
+      final transfers = _mergeAndSortTransfers(incoming, sent);
       if (mounted) {
         setState(() {
           _transfers = transfers;
           _loading = false;
-          _hasMore = transfers.length >= AppConstants.transfersPageSize;
+          _hasMore = incoming.length >= AppConstants.transfersPageSize ||
+              sent.length >= AppConstants.transfersPageSize;
         });
       }
     } catch (e) {
@@ -90,18 +99,89 @@ class _HistoryScreenState extends State<HistoryScreen> {
     if (!_hasMore) return;
     final nextPage = _currentPage + 1;
     try {
-      final more = await TransferService.getIncomingTransfers(
+      final moreIncoming = await TransferService.getIncomingTransfers(
         widget.identity.id,
         page: nextPage,
       );
+      final moreSent = await TransferService.getSentTransfers(
+        widget.identity.id,
+        page: nextPage,
+      );
+      final more = _mergeAndSortTransfers(moreIncoming, moreSent);
       if (mounted) {
         setState(() {
-          _transfers = [...?_transfers, ...more];
+          _transfers = _mergeAndSortExistingWithMore(_transfers ?? [], more);
           _currentPage = nextPage;
-          _hasMore = more.length >= AppConstants.transfersPageSize;
+          _hasMore = moreIncoming.length >= AppConstants.transfersPageSize ||
+              moreSent.length >= AppConstants.transfersPageSize;
         });
       }
     } catch (_) {}
+  }
+
+  List<Map<String, dynamic>> _mergeAndSortTransfers(
+    List<Map<String, dynamic>> incoming,
+    List<Map<String, dynamic>> sent,
+  ) {
+    final normalizedIncoming = incoming.map((t) {
+      final senderCode = (t['sender'] as Map?)?['short_code'] ?? '???';
+      return {
+        ...t,
+        '_direction': 'received',
+        '_counterpartyCode': senderCode,
+      };
+    });
+    final normalizedSent = sent.map((t) {
+      final receiverCode = (t['receiver'] as Map?)?['short_code'] ?? '???';
+      return {
+        ...t,
+        '_direction': 'sent',
+        '_counterpartyCode': receiverCode,
+      };
+    });
+    final all = [...normalizedIncoming, ...normalizedSent];
+    all.sort((a, b) {
+      final aDate = DateTime.tryParse((a['created_at'] ?? '').toString());
+      final bDate = DateTime.tryParse((b['created_at'] ?? '').toString());
+      if (aDate == null && bDate == null) return 0;
+      if (aDate == null) return 1;
+      if (bDate == null) return -1;
+      return bDate.compareTo(aDate);
+    });
+    return all;
+  }
+
+  List<Map<String, dynamic>> _mergeAndSortExistingWithMore(
+    List<Map<String, dynamic>> existing,
+    List<Map<String, dynamic>> more,
+  ) {
+    final byId = <String, Map<String, dynamic>>{};
+    for (final t in [...existing, ...more]) {
+      final id = (t['id'] ?? '').toString();
+      if (id.isNotEmpty) byId[id] = t;
+    }
+    final merged = byId.values.toList();
+    merged.sort((a, b) {
+      final aDate = DateTime.tryParse((a['created_at'] ?? '').toString());
+      final bDate = DateTime.tryParse((b['created_at'] ?? '').toString());
+      if (aDate == null && bDate == null) return 0;
+      if (aDate == null) return 1;
+      if (bDate == null) return -1;
+      return bDate.compareTo(aDate);
+    });
+    return merged;
+  }
+
+  List<Map<String, dynamic>> _applyFilter(
+      List<Map<String, dynamic>> transfers) {
+    switch (_filter) {
+      case _HistoryFilter.sent:
+        return transfers.where((t) => t['_direction'] == 'sent').toList();
+      case _HistoryFilter.received:
+        return transfers.where((t) => t['_direction'] == 'received').toList();
+      case _HistoryFilter.all:
+        return transfers;
+    }
   }
 
   String _timeAgo(String isoDate) {
@@ -127,8 +207,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
               children: [
                 ClipRRect(
                   borderRadius: BorderRadius.circular(10),
-                  child:
-                      Image.asset('assets/logo.png', width: 32, height: 32),
+                  child: Image.asset('assets/logo.png', width: 32, height: 32),
                 ),
                 const SizedBox(width: 10),
                 const Text(
@@ -143,13 +222,39 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 const Spacer(),
                 IconButton(
                   icon: Icon(Icons.refresh_rounded,
-                      color: AppColors.onSurfaceVariant
-                          .withValues(alpha: 0.5)),
+                      color: AppColors.onSurfaceVariant.withValues(alpha: 0.5)),
                   onPressed: _loadTransfers,
                 ),
               ],
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Wrap(
+              spacing: 8,
+              children: [
+                ChoiceChip(
+                  label: const Text('All'),
+                  selected: _filter == _HistoryFilter.all,
+                  onSelected: (_) =>
+                      setState(() => _filter = _HistoryFilter.all),
+                ),
+                ChoiceChip(
+                  label: const Text('Received'),
+                  selected: _filter == _HistoryFilter.received,
+                  onSelected: (_) =>
+                      setState(() => _filter = _HistoryFilter.received),
+                ),
+                ChoiceChip(
+                  label: const Text('Sent'),
+                  selected: _filter == _HistoryFilter.sent,
+                  onSelected: (_) =>
+                      setState(() => _filter = _HistoryFilter.sent),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
 
           // Content
           Expanded(
@@ -188,54 +293,62 @@ class _HistoryScreenState extends State<HistoryScreen> {
                           ),
                         ),
                       )
-                    : _transfers == null || _transfers!.isEmpty
+                    : _transfers == null || _applyFilter(_transfers!).isEmpty
                         ? _buildEmptyState()
                         : RefreshIndicator(
                             onRefresh: _loadTransfers,
                             color: AppColors.primary,
-                            child: ListView.separated(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 20, vertical: 8),
-                              itemCount:
-                                  _transfers!.length + (_hasMore ? 1 : 0),
-                              separatorBuilder: (_, __) =>
-                                  const SizedBox(height: 10),
-                              itemBuilder: (context, index) {
-                                if (index == _transfers!.length) {
-                                  _loadMore();
-                                  return Center(
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(16),
-                                      child: SizedBox(
-                                        width: 20,
-                                        height: 20,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: AppColors.primary
-                                              .withValues(alpha: 0.5),
+                            child: Builder(builder: (context) {
+                              final visibleTransfers =
+                                  _applyFilter(_transfers!);
+                              return ListView.separated(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 20, vertical: 8),
+                                itemCount: visibleTransfers.length +
+                                    (_hasMore ? 1 : 0),
+                                separatorBuilder: (_, __) =>
+                                    const SizedBox(height: 10),
+                                itemBuilder: (context, index) {
+                                  if (index == visibleTransfers.length) {
+                                    _loadMore();
+                                    return Center(
+                                      child: Padding(
+                                        padding: const EdgeInsets.all(16),
+                                        child: SizedBox(
+                                          width: 20,
+                                          height: 20,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: AppColors.primary
+                                                .withValues(alpha: 0.5),
+                                          ),
                                         ),
                                       ),
-                                    ),
-                                  );
-                                }
+                                    );
+                                  }
 
-                                final t = _transfers![index];
-                                final senderCode =
-                                    (t['sender'] as Map?)?['short_code'] ??
-                                        '???';
-                                final status =
-                                    (t['status'] ?? 'pending') as String;
-                                final createdAt =
-                                    (t['created_at'] ?? '') as String;
-                                final isExpired = status == 'expired';
-                                return _TransferCard(
-                                  senderCode: senderCode,
-                                  status: status,
-                                  timeAgo: _timeAgo(createdAt),
-                                  isExpired: isExpired,
-                                );
-                              },
-                            ),
+                                  final t = visibleTransfers[index];
+                                  final direction =
+                                      (t['_direction'] ?? 'received')
+                                          .toString();
+                                  final counterpartyCode =
+                                      (t['_counterpartyCode'] ?? '???')
+                                          .toString();
+                                  final status =
+                                      (t['status'] ?? 'pending').toString();
+                                  final createdAt =
+                                      (t['created_at'] ?? '').toString();
+                                  final isExpired = status == 'expired';
+                                  return _TransferCard(
+                                    direction: direction,
+                                    counterpartyCode: counterpartyCode,
+                                    status: status,
+                                    timeAgo: _timeAgo(createdAt),
+                                    isExpired: isExpired,
+                                  );
+                                },
+                              );
+                            }),
                           ),
           ),
         ],
@@ -244,6 +357,16 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 
   Widget _buildEmptyState() {
+    final title = switch (_filter) {
+      _HistoryFilter.sent => 'No files sent yet',
+      _HistoryFilter.received => 'No files received yet',
+      _HistoryFilter.all => 'No transfers yet',
+    };
+    final subtitle = switch (_filter) {
+      _HistoryFilter.sent => 'Send files to see them here',
+      _HistoryFilter.received => 'Share your code so others can send you files',
+      _HistoryFilter.all => 'Your sent and received files will appear here',
+    };
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -252,8 +375,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
               size: 48,
               color: AppColors.onSurfaceVariant.withValues(alpha: 0.15)),
           const SizedBox(height: 20),
-          const Text(
-            'No files received yet',
+          Text(
+            title,
             style: TextStyle(
               color: AppColors.onSurfaceVariant,
               fontSize: 16,
@@ -262,7 +385,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
           ),
           const SizedBox(height: 6),
           Text(
-            'Share your code so others can send you files',
+            subtitle,
             style: TextStyle(
               color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
               fontSize: 13,
@@ -298,13 +421,15 @@ class _HistoryScreenState extends State<HistoryScreen> {
 }
 
 class _TransferCard extends StatelessWidget {
-  final String senderCode;
+  final String direction;
+  final String counterpartyCode;
   final String status;
   final String timeAgo;
   final bool isExpired;
 
   const _TransferCard({
-    required this.senderCode,
+    required this.direction,
+    required this.counterpartyCode,
     required this.status,
     required this.timeAgo,
     this.isExpired = false,
@@ -337,7 +462,9 @@ class _TransferCard extends StatelessWidget {
         decoration: BoxDecoration(
           color: AppColors.cardBg,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: const Color.fromARGB(255, 135, 175, 255).withValues(alpha: 0.6)),
+          border: Border.all(
+              color: const Color.fromARGB(255, 135, 175, 255)
+                  .withValues(alpha: 0.6)),
         ),
         child: Row(
           children: [
@@ -349,12 +476,8 @@ class _TransferCard extends StatelessWidget {
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Icon(
-                isExpired
-                    ? Icons.timer_off_rounded
-                    : Icons.person_rounded,
-                color: isExpired
-                    ? AppColors.outlineVariant
-                    : AppColors.primary,
+                isExpired ? Icons.timer_off_rounded : _directionIcon(),
+                color: isExpired ? AppColors.outlineVariant : AppColors.primary,
                 size: 20,
               ),
             ),
@@ -364,7 +487,7 @@ class _TransferCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'From $senderCode',
+                    '${direction == 'sent' ? 'To' : 'From'} $counterpartyCode',
                     style: const TextStyle(
                       fontWeight: FontWeight.w600,
                       fontSize: 14,
@@ -385,10 +508,12 @@ class _TransferCard extends StatelessWidget {
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        isExpired ? 'Expired' : status,
+                        isExpired
+                            ? 'Expired'
+                            : '${direction == 'sent' ? 'Sent' : 'Received'} · $status',
                         style: TextStyle(
-                          color: AppColors.onSurfaceVariant
-                              .withValues(alpha: 0.5),
+                          color:
+                              AppColors.onSurfaceVariant.withValues(alpha: 0.5),
                           fontSize: 11,
                         ),
                       ),
@@ -396,8 +521,8 @@ class _TransferCard extends StatelessWidget {
                       Text(
                         timeAgo,
                         style: TextStyle(
-                          color: AppColors.onSurfaceVariant
-                              .withValues(alpha: 0.3),
+                          color:
+                              AppColors.onSurfaceVariant.withValues(alpha: 0.3),
                           fontSize: 11,
                         ),
                       ),
@@ -410,5 +535,11 @@ class _TransferCard extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  IconData _directionIcon() {
+    return direction == 'sent'
+        ? Icons.north_east_rounded
+        : Icons.south_west_rounded;
   }
 }

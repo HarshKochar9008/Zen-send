@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'core/navigation/root_navigator.dart';
@@ -81,6 +84,33 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   bool _loading = true;
   String? _error;
 
+  Future<UserIdentity> _initializeIdentityWithRetry() async {
+    try {
+      return await IdentityService.initialize();
+    } catch (e) {
+      if (!_isNetworkLookupFailure(e)) rethrow;
+      // Emulator DNS/network can be flaky right after app boot; retry once.
+      await Future<void>.delayed(const Duration(milliseconds: 900));
+      return await IdentityService.initialize();
+    }
+  }
+
+  bool _isNetworkLookupFailure(Object error) {
+    if (error is SocketException) return true;
+    final message = error.toString().toLowerCase();
+    return message.contains('failed host lookup') ||
+        message.contains('socketexception');
+  }
+
+  String _buildStartupErrorMessage(Object error) {
+    if (_isNetworkLookupFailure(error)) {
+      return 'Could not reach Supabase. Check emulator internet/DNS, then tap Retry.';
+    }
+    return kDebugMode
+        ? 'Startup failed: $error'
+        : 'Could not connect. Check your internet and try again.';
+  }
+
   @override
   void initState() {
     super.initState();
@@ -108,7 +138,7 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
       _error = null;
     });
     try {
-      final identity = await IdentityService.initialize();
+      final identity = await _initializeIdentityWithRetry();
       if (mounted) {
         NotificationService.setUserId(identity.id);
         await NotificationService.syncFcmToken(identity.id);
@@ -125,10 +155,17 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
           _loading = false;
         });
       }
-    } catch (_) {
+    } on StateError catch (e) {
       if (mounted) {
         setState(() {
-          _error = 'Could not connect. Check your internet and try again.';
+          _error = e.message;
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = _buildStartupErrorMessage(e);
           _loading = false;
         });
       }

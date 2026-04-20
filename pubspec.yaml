@@ -38,6 +38,7 @@ dependencies:
   firebase_core: ^4.7.0
   firebase_messaging: ^16.2.0
   flutter_local_notifications: ^21.0.0
+  flutter_dotenv: ^5.2.1
 
   cupertino_icons: ^1.0.6
   tus_client_dart: ^2.5.0
@@ -71,4 +72,5 @@ flutter_launcher_icons:
 flutter:
   uses-material-design: true
   assets:
+    - .env
     - assets/logo.png
