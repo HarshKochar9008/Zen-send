@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:battery_plus/battery_plus.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -16,7 +19,7 @@ class SendScreen extends StatefulWidget {
   State<SendScreen> createState() => _SendScreenState();
 }
 
-class _SendScreenState extends State<SendScreen> {
+class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
   final _codeController = TextEditingController();
   List<PlatformFile> _selectedFiles = [];
   List<FileUploadProgress>? _uploadStates;
@@ -27,11 +30,112 @@ class _SendScreenState extends State<SendScreen> {
   String? _codeError;
   String? _validatedRecipientId;
   TransferCancellationToken? _uploadCancellationToken;
+  final Battery _battery = Battery();
+  bool _powerSaveMode = false;
+  int? _batteryLevel;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refreshPowerSaveMode();
+    _checkInterruptedUploadRecovery();
+  }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _codeController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refreshPowerSaveMode();
+    }
+  }
+
+  Future<void> _refreshPowerSaveMode() async {
+    final enabled = await _isPowerSaveModeEnabled();
+    int? level;
+    try {
+      level = await _battery.batteryLevel;
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _powerSaveMode = enabled;
+      _batteryLevel = level;
+    });
+  }
+
+  Future<void> _checkInterruptedUploadRecovery() async {
+    final pending = await TransferService.getPendingUploadJob(
+      senderId: widget.identity.id,
+    );
+    if (!mounted || pending == null) return;
+
+    final existing = <PlatformFile>[];
+    for (final file in pending.toPlatformFiles()) {
+      final p = file.path;
+      if (p != null && await File(p).exists()) {
+        existing.add(file);
+      }
+    }
+
+    if (existing.isEmpty) {
+      await TransferService.clearPendingUploadJob();
+      return;
+    }
+    if (!mounted) return;
+
+    final shouldResume = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.cardBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Resume interrupted upload?',
+          style: TextStyle(color: AppColors.onSurface, fontSize: 16),
+        ),
+        content: Text(
+          'We found an interrupted upload with ${existing.length} file(s). '
+          'Do you want to resume it?',
+          style: TextStyle(
+            color: AppColors.onSurfaceVariant.withValues(alpha: 0.8),
+            fontSize: 13,
+            height: 1.4,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Discard'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Resume'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted) return;
+    if (shouldResume != true) {
+      await TransferService.clearPendingUploadJob();
+      return;
+    }
+
+    setState(() {
+      _selectedFiles = existing;
+      _validatedRecipientId = pending.receiverId;
+      _codeValidated = true;
+      _codeError = null;
+      _error = 'Resumed interrupted upload. Tap Send to continue.';
+      if (pending.receiverCode != null && pending.receiverCode!.isNotEmpty) {
+        _codeController.text = pending.receiverCode!;
+      }
+    });
   }
 
   Future<bool> _hasConnectivity() async {
@@ -43,6 +147,103 @@ class _SendScreenState extends State<SendScreen> {
     }
   }
 
+  Future<bool> _isLikelyMeteredConnection() async {
+    try {
+      final result = await Connectivity().checkConnectivity();
+      return result.contains(ConnectivityResult.mobile);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _confirmMeteredUploadIfNeeded() async {
+    if (_totalSize < AppConstants.cellularWarnThresholdBytes) return true;
+    final isMetered = await _isLikelyMeteredConnection();
+    if (!mounted) return false;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.cardBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          isMetered ? 'Using mobile data' : 'Large upload',
+          style: TextStyle(color: AppColors.onSurface, fontSize: 16),
+        ),
+        content: Text(
+          isMetered
+              ? 'This upload is ${_formatSize(_totalSize)} and may use significant '
+                  'cellular data. Continue?'
+              : 'This upload is ${_formatSize(_totalSize)}. '
+                  'Large uploads may take longer and use more data. Continue?',
+          style: TextStyle(
+            color: AppColors.onSurfaceVariant.withValues(alpha: 0.8),
+            fontSize: 13,
+            height: 1.4,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+
+    return confirmed ?? false;
+  }
+
+  Future<bool> _isPowerSaveModeEnabled() async {
+    try {
+      return await _battery.isInBatterySaveMode;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _confirmPowerSaveUploadIfNeeded() async {
+    if (_totalSize < AppConstants.cellularWarnThresholdBytes) return true;
+    final powerSave = await _isPowerSaveModeEnabled();
+    if (!powerSave || !mounted) return true;
+
+    final approved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.cardBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Battery saver is on',
+          style: TextStyle(color: AppColors.onSurface, fontSize: 16),
+        ),
+        content: Text(
+          'This upload is ${_formatSize(_totalSize)}. '
+          'Power-save mode may throttle network and interrupt long transfers. Continue anyway?',
+          style: TextStyle(
+            color: AppColors.onSurfaceVariant.withValues(alpha: 0.8),
+            fontSize: 13,
+            height: 1.4,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+    return approved ?? false;
+  }
+
   Future<void> _pickFiles() async {
     try {
       final result = await FilePicker.pickFiles(
@@ -52,8 +253,7 @@ class _SendScreenState extends State<SendScreen> {
       );
       if (result == null || !mounted) return;
 
-      final accessibleRaw =
-          result.files.where((f) => f.path != null).toList();
+      final accessibleRaw = result.files.where((f) => f.path != null).toList();
       final seenNames = <String>{};
       final accessible = <PlatformFile>[];
       for (final f in accessibleRaw) {
@@ -65,8 +265,7 @@ class _SendScreenState extends State<SendScreen> {
           .toList();
       if (oversized.isNotEmpty) {
         setState(() {
-          _error =
-              '${oversized.first.name} exceeds '
+          _error = '${oversized.first.name} exceeds '
               '${AppConstants.maxFileSizeBytes ~/ 1024 ~/ 1024} MB limit';
         });
         return;
@@ -86,8 +285,7 @@ class _SendScreenState extends State<SendScreen> {
       final totalCount = _selectedFiles.length + newFiles.length;
       if (totalCount > AppConstants.maxFilesPerTransfer) {
         setState(() {
-          _error =
-              'Max ${AppConstants.maxFilesPerTransfer} files per transfer';
+          _error = 'Max ${AppConstants.maxFilesPerTransfer} files per transfer';
         });
         return;
       }
@@ -126,12 +324,10 @@ class _SendScreenState extends State<SendScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppColors.cardBg,
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
           children: [
-            Icon(Icons.file_copy_rounded,
-                color: AppColors.warning, size: 20),
+            Icon(Icons.file_copy_rounded, color: AppColors.warning, size: 20),
             const SizedBox(width: 10),
             const Text(
               'Duplicate Files',
@@ -185,9 +381,22 @@ class _SendScreenState extends State<SendScreen> {
   }
 
   Future<void> _validateCode() async {
-    final code = _codeController.text.trim().toUpperCase();
+    final code = AppConstants.normalizeShortCode(_codeController.text);
     if (code.isEmpty) {
       setState(() => _codeError = 'Enter a recipient code');
+      return;
+    }
+    if (code.length != AppConstants.codeLength) {
+      setState(
+        () => _codeError =
+            'Code must be exactly ${AppConstants.codeLength} characters',
+      );
+      return;
+    }
+    if (!AppConstants.isValidShortCodeFormat(code)) {
+      setState(
+        () => _codeError = 'Use only A-Z and 2-9 (excluding O, I, L, 0, 1)',
+      );
       return;
     }
     if (code == widget.identity.shortCode) {
@@ -234,6 +443,10 @@ class _SendScreenState extends State<SendScreen> {
 
   Future<void> _send() async {
     if (_validatedRecipientId == null || _selectedFiles.isEmpty) return;
+    final powerApproved = await _confirmPowerSaveUploadIfNeeded();
+    if (!powerApproved || !mounted) return;
+    final confirmed = await _confirmMeteredUploadIfNeeded();
+    if (!confirmed || !mounted) return;
 
     setState(() {
       _sending = true;
@@ -246,6 +459,7 @@ class _SendScreenState extends State<SendScreen> {
       final result = await TransferService.sendFiles(
         senderId: widget.identity.id,
         receiverId: _validatedRecipientId!,
+        receiverCode: AppConstants.normalizeShortCode(_codeController.text),
         files: _selectedFiles,
         cancellationToken: _uploadCancellationToken,
         onProgress: (states) {
@@ -258,18 +472,16 @@ class _SendScreenState extends State<SendScreen> {
       if (result.success) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-                '${result.completedFiles} file(s) sent successfully'),
+            content: Text('${result.completedFiles} file(s) sent successfully'),
             behavior: SnackBarBehavior.floating,
             backgroundColor: AppColors.snackBarBg,
           ),
         );
         Navigator.pop(context);
       } else {
+        final failureMessage = _buildPartialFailureMessage(result);
         setState(() {
-          _error =
-              '${result.completedFiles}/${result.totalFiles} files sent. '
-              'Some failed — see details above.';
+          _error = failureMessage;
           _sending = false;
         });
       }
@@ -283,29 +495,82 @@ class _SendScreenState extends State<SendScreen> {
     } on FileTooLargeException catch (e) {
       if (mounted) {
         setState(() {
-          _error = e.toString();
+          _error = _toUserFriendlyError(e.toString());
           _sending = false;
         });
       }
     } on TooManyFilesException catch (e) {
       if (mounted) {
         setState(() {
-          _error = e.toString();
+          _error = _toUserFriendlyError(e.toString());
           _sending = false;
         });
       }
     } catch (e) {
       if (mounted) {
         setState(() {
-          _error =
-              'Transfer failed: '
-              '${e.toString().replaceAll('Exception: ', '')}';
+          _error = _toUserFriendlyError(e.toString());
           _sending = false;
         });
       }
     } finally {
       _uploadCancellationToken = null;
     }
+  }
+
+  String _buildPartialFailureMessage(TransferResult result) {
+    final failed = result.fileStates
+        .where((s) => s.status == FileUploadStatus.failed)
+        .toList();
+    if (failed.isEmpty) {
+      return 'Some files could not be sent.';
+    }
+
+    final first = failed.first;
+    final reason = _toUserFriendlyError(first.error ?? 'Unknown error');
+
+    if (failed.length == 1) {
+      return '$reason (${first.fileName})';
+    }
+
+    return '$reason (${first.fileName}). ${failed.length - 1} more file(s) failed.';
+  }
+
+  String _toUserFriendlyError(String raw) {
+    var message = raw.replaceAll('Exception: ', '').trim();
+
+    if (message.contains('Failed after')) {
+      final idx = message.indexOf(':');
+      if (idx != -1 && idx + 1 < message.length) {
+        message = message.substring(idx + 1).trim();
+      }
+    }
+
+    if (message.contains('No internet connection')) {
+      return 'No internet connection. Please try again.';
+    }
+    if (message.contains('File not accessible on disk')) {
+      return 'This file is no longer accessible. Please pick it again.';
+    }
+    if (message.contains('Hash computation failed')) {
+      return 'Could not read this file. Please pick it again.';
+    }
+    if (message.contains('Upload failed (401') ||
+        message.contains('Upload failed (403')) {
+      return 'Upload permission failed. Please try again.';
+    }
+    if (message.toLowerCase().contains('protocol(413') ||
+        message.toLowerCase().contains('payload too large') ||
+        message.toLowerCase().contains('creating upload')) {
+      return 'File is too large for the server upload limit. '
+          'Try a smaller file or increase the Supabase Storage bucket size limit.';
+    }
+    if (message.toLowerCase().contains('invalid') &&
+        message.toLowerCase().contains('mime')) {
+      return 'This file format is not supported.';
+    }
+
+    return message;
   }
 
   void _cancelUpload() {
@@ -316,8 +581,7 @@ class _SendScreenState extends State<SendScreen> {
     return TransferService.formatFileSize(bytes);
   }
 
-  int get _totalSize =>
-      _selectedFiles.fold<int>(0, (sum, f) => sum + f.size);
+  int get _totalSize => _selectedFiles.fold<int>(0, (sum, f) => sum + f.size);
 
   String _mimeCategory(String fileName) {
     final mime = lookupMimeType(fileName) ?? '';
@@ -336,6 +600,78 @@ class _SendScreenState extends State<SendScreen> {
     return 'File';
   }
 
+  Widget _buildPowerSaveBanner() {
+    if (!_powerSaveMode) return const SizedBox.shrink();
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.battery_saver_rounded,
+            size: 16,
+            color: AppColors.warning.withValues(alpha: 0.9),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Battery saver is on. Large uploads may be slower or pause.',
+              style: TextStyle(
+                color: AppColors.onSurfaceVariant.withValues(alpha: 0.85),
+                fontSize: 12,
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBatteryBadge() {
+    final levelText = _batteryLevel != null ? '${_batteryLevel!}%' : '--%';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: (_powerSaveMode ? AppColors.warning : AppColors.primary)
+            .withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: (_powerSaveMode ? AppColors.warning : AppColors.primary)
+              .withValues(alpha: 0.35),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            _powerSaveMode
+                ? Icons.battery_saver_rounded
+                : Icons.battery_std_rounded,
+            size: 14,
+            color: (_powerSaveMode ? AppColors.warning : AppColors.primary)
+                .withValues(alpha: 0.95),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            levelText,
+            style: TextStyle(
+              color: AppColors.onSurfaceVariant.withValues(alpha: 0.9),
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -344,8 +680,7 @@ class _SendScreenState extends State<SendScreen> {
           children: [
             // Header
             Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
               child: Row(
                 children: [
                   GestureDetector(
@@ -356,8 +691,8 @@ class _SendScreenState extends State<SendScreen> {
                   const SizedBox(width: 12),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(10),
-                    child: Image.asset('assets/logo.png',
-                        width: 32, height: 32),
+                    child:
+                        Image.asset('assets/logo.png', width: 32, height: 32),
                   ),
                   const SizedBox(width: 10),
                   const Text(
@@ -370,11 +705,7 @@ class _SendScreenState extends State<SendScreen> {
                     ),
                   ),
                   const Spacer(),
-                  IconButton(
-                    onPressed: () {},
-                    icon: const Icon(Icons.settings_rounded,
-                        color: AppColors.onSurfaceVariant, size: 22),
-                  ),
+                  _buildBatteryBadge(),
                 ],
               ),
             ),
@@ -407,6 +738,7 @@ class _SendScreenState extends State<SendScreen> {
                       ),
                     ),
                     const SizedBox(height: 24),
+                    _buildPowerSaveBanner(),
 
                     // Recipient code input card
                     Container(
@@ -414,7 +746,8 @@ class _SendScreenState extends State<SendScreen> {
                       decoration: BoxDecoration(
                         color: AppColors.cardBg,
                         borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: AppColors.cardBorder.withValues(alpha: 0.6)),
+                        border: Border.all(
+                            color: AppColors.cardBorder.withValues(alpha: 0.6)),
                       ),
                       child: Row(
                         children: [
@@ -422,8 +755,7 @@ class _SendScreenState extends State<SendScreen> {
                             child: TextField(
                               controller: _codeController,
                               enabled: !_sending && !_codeValidated,
-                              textCapitalization:
-                                  TextCapitalization.characters,
+                              textCapitalization: TextCapitalization.characters,
                               maxLength: AppConstants.codeLength,
                               style: const TextStyle(
                                 fontSize: 16,
@@ -597,6 +929,18 @@ class _SendScreenState extends State<SendScreen> {
                     ],
 
                     const SizedBox(height: 20),
+                    if (_codeValidated && _selectedFiles.isNotEmpty) ...[
+                      Text(
+                        'Keep the app open while uploading. Closing the app will stop the transfer.',
+                        style: TextStyle(
+                          color:
+                              AppColors.onSurfaceVariant.withValues(alpha: 0.6),
+                          fontSize: 12,
+                          height: 1.35,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
                   ],
                 ),
               ),
@@ -622,9 +966,7 @@ class _SendScreenState extends State<SendScreen> {
                               begin: Alignment.centerLeft,
                               end: Alignment.centerRight,
                             ),
-                      color: _sending
-                          ? AppColors.outlineVariant
-                          : null,
+                      color: _sending ? AppColors.outlineVariant : null,
                       borderRadius: BorderRadius.circular(14),
                     ),
                     child: FilledButton(
@@ -698,8 +1040,8 @@ class _SendScreenState extends State<SendScreen> {
         const SizedBox(width: 12),
         Text(
           'Sending $done / ${states.length}',
-          style: const TextStyle(
-              color: AppColors.onSurfaceVariant, fontSize: 13),
+          style:
+              const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 13),
         ),
       ],
     );
@@ -775,8 +1117,8 @@ class _FileProgressTile extends StatelessWidget {
                   state.fileName,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: 13, color: AppColors.onSurface),
+                  style:
+                      const TextStyle(fontSize: 13, color: AppColors.onSurface),
                 ),
               ),
               Text(
@@ -917,14 +1259,12 @@ class _EmptyFilesView extends StatelessWidget {
             children: [
               Icon(Icons.cloud_upload_outlined,
                   size: 40,
-                  color:
-                      AppColors.onSurfaceVariant.withValues(alpha: 0.2)),
+                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.2)),
               const SizedBox(height: 16),
               Text(
                 'Tap to select files',
                 style: TextStyle(
-                  color:
-                      AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
                   fontSize: 14,
                 ),
               ),
@@ -932,8 +1272,7 @@ class _EmptyFilesView extends StatelessWidget {
               Text(
                 'Images, videos, documents — any file type',
                 style: TextStyle(
-                  color:
-                      AppColors.onSurfaceVariant.withValues(alpha: 0.25),
+                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.25),
                   fontSize: 11,
                 ),
               ),
@@ -1016,8 +1355,7 @@ class _FileTile extends StatelessWidget {
                 Text(
                   '$size • $mimeType',
                   style: TextStyle(
-                    color:
-                        AppColors.onSurfaceVariant.withValues(alpha: 0.5),
+                    color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
                     fontSize: 11,
                   ),
                 ),
@@ -1030,8 +1368,7 @@ class _FileTile extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.all(6),
                 child: Icon(Icons.close_rounded,
-                    color:
-                        AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                    color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
                     size: 18),
               ),
             ),

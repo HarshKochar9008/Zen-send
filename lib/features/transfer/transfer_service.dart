@@ -6,8 +6,10 @@ import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:mime/mime.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:tus_client_dart/tus_client_dart.dart';
 
@@ -67,6 +69,93 @@ class TransferResult {
     required this.totalFiles,
     required this.fileStates,
   });
+}
+
+class PendingUploadJob {
+  final String senderId;
+  final String receiverId;
+  final String? receiverCode;
+  final List<PendingUploadFile> files;
+  final DateTime createdAt;
+
+  const PendingUploadJob({
+    required this.senderId,
+    required this.receiverId,
+    required this.files,
+    required this.createdAt,
+    this.receiverCode,
+  });
+
+  List<PlatformFile> toPlatformFiles() {
+    return files
+        .map(
+          (f) => PlatformFile(
+            name: f.name,
+            path: f.path,
+            size: f.size,
+          ),
+        )
+        .toList();
+  }
+
+  Map<String, dynamic> toJson() => {
+        'sender_id': senderId,
+        'receiver_id': receiverId,
+        'receiver_code': receiverCode,
+        'created_at': createdAt.toIso8601String(),
+        'files': files.map((f) => f.toJson()).toList(),
+      };
+
+  static PendingUploadJob? fromJson(Map<String, dynamic> json) {
+    final filesRaw = json['files'];
+    if (filesRaw is! List) return null;
+    final files = filesRaw
+        .whereType<Map>()
+        .map((e) => PendingUploadFile.fromJson(Map<String, dynamic>.from(e)))
+        .whereType<PendingUploadFile>()
+        .toList();
+    if (files.isEmpty) return null;
+
+    final senderId = (json['sender_id'] ?? '').toString();
+    final receiverId = (json['receiver_id'] ?? '').toString();
+    if (senderId.isEmpty || receiverId.isEmpty) return null;
+
+    return PendingUploadJob(
+      senderId: senderId,
+      receiverId: receiverId,
+      receiverCode: (json['receiver_code'] as String?)?.trim(),
+      createdAt: DateTime.tryParse((json['created_at'] ?? '').toString()) ??
+          DateTime.now().toUtc(),
+      files: files,
+    );
+  }
+}
+
+class PendingUploadFile {
+  final String name;
+  final String path;
+  final int size;
+
+  const PendingUploadFile({
+    required this.name,
+    required this.path,
+    required this.size,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'path': path,
+        'size': size,
+      };
+
+  static PendingUploadFile? fromJson(Map<String, dynamic> json) {
+    final name = (json['name'] ?? '').toString();
+    final path = (json['path'] ?? '').toString();
+    final size = json['size'];
+    final parsedSize = size is int ? size : int.tryParse('$size') ?? 0;
+    if (name.isEmpty || path.isEmpty || parsedSize <= 0) return null;
+    return PendingUploadFile(name: name, path: path, size: parsedSize);
+  }
 }
 
 // ── Exceptions ───────────────────────────────────────────────────────────────
@@ -145,6 +234,7 @@ class _DigestSink implements Sink<Digest> {
 
 class TransferService {
   static const _maxRetries = 3;
+  static const _pendingUploadKey = 'pending_upload_job_v1';
 
   /// Compute SHA-256 of a file using streaming reads (constant memory).
   static Future<String> computeSha256(
@@ -241,7 +331,8 @@ class TransferService {
         retryScale: RetryScale.exponential,
       );
 
-      cancelTimer = Timer.periodic(const Duration(milliseconds: 250), (_) async {
+      cancelTimer =
+          Timer.periodic(const Duration(milliseconds: 250), (_) async {
         if (cancellationToken?.isCancelled == true) {
           cancelTimer?.cancel();
           try {
@@ -265,7 +356,8 @@ class TransferService {
         },
         onProgress: (percent, _) {
           if (fileLength <= 0) return;
-          final sent = (fileLength * (percent / 100.0)).round().clamp(0, fileLength);
+          final sent =
+              (fileLength * (percent / 100.0)).round().clamp(0, fileLength);
           onProgress?.call(sent, fileLength);
         },
       );
@@ -359,6 +451,7 @@ class TransferService {
     required List<PlatformFile> files,
     required void Function(List<FileUploadProgress> states) onProgress,
     TransferCancellationToken? cancellationToken,
+    String? receiverCode,
   }) async {
     await SupabaseConfig.ensureValidSession();
     final client = SupabaseConfig.client;
@@ -371,6 +464,13 @@ class TransferService {
     if (files.length > AppConstants.maxFilesPerTransfer) {
       throw TooManyFilesException(files.length);
     }
+    final validFiles = files.where((f) => f.path != null).toList();
+    await _storePendingUploadJob(
+      senderId: senderId,
+      receiverId: receiverId,
+      receiverCode: receiverCode,
+      files: validFiles,
+    );
 
     var states = files
         .map((f) => FileUploadProgress(fileName: f.name, fileSize: f.size))
@@ -431,14 +531,14 @@ class TransferService {
             diskFile,
             cancellationToken: cancellationToken,
             onProgress: (p, t) {
-            if (t > 0) {
-              states = _updateState(
-                states,
-                i,
-                states[i].copyWith(progress: p / t),
-              );
-              onProgress(states);
-            }
+              if (t > 0) {
+                states = _updateState(
+                  states,
+                  i,
+                  states[i].copyWith(progress: p / t),
+                );
+                onProgress(states);
+              }
             },
           );
         } catch (e) {
@@ -448,7 +548,8 @@ class TransferService {
             i,
             states[i].copyWith(
               status: FileUploadStatus.failed,
-              error: 'Hash computation failed: ${e.toString().replaceAll('Exception: ', '')}',
+              error:
+                  'Hash computation failed: ${e.toString().replaceAll('Exception: ', '')}',
             ),
           );
           onProgress(states);
@@ -541,8 +642,7 @@ class TransferService {
 
       final allDone =
           states.every((s) => s.status == FileUploadStatus.completed);
-      final anyDone =
-          states.any((s) => s.status == FileUploadStatus.completed);
+      final anyDone = states.any((s) => s.status == FileUploadStatus.completed);
 
       await _safeUpdateTransferStatus(
         client,
@@ -553,6 +653,13 @@ class TransferService {
                 ? 'partial'
                 : 'failed',
       );
+      if (anyDone) {
+        await _triggerIncomingTransferPush(
+          transferId: transferId,
+          senderId: senderId,
+          receiverId: receiverId,
+        );
+      }
 
       return TransferResult(
         success: allDone,
@@ -563,7 +670,62 @@ class TransferService {
     } catch (e) {
       await _safeUpdateTransferStatus(client, transferId, 'failed');
       rethrow;
+    } finally {
+      // If app is force-killed, this won't run and pending job remains for recovery.
+      await clearPendingUploadJob();
     }
+  }
+
+  static Future<void> _storePendingUploadJob({
+    required String senderId,
+    required String receiverId,
+    required List<PlatformFile> files,
+    String? receiverCode,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final serializableFiles = files
+        .where((f) => f.path != null)
+        .map(
+          (f) => PendingUploadFile(
+            name: f.name,
+            path: f.path!,
+            size: f.size,
+          ),
+        )
+        .toList();
+    if (serializableFiles.isEmpty) return;
+
+    final job = PendingUploadJob(
+      senderId: senderId,
+      receiverId: receiverId,
+      receiverCode: receiverCode,
+      createdAt: DateTime.now().toUtc(),
+      files: serializableFiles,
+    );
+    await prefs.setString(_pendingUploadKey, jsonEncode(job.toJson()));
+  }
+
+  static Future<PendingUploadJob?> getPendingUploadJob({
+    required String senderId,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_pendingUploadKey);
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) return null;
+      final job = PendingUploadJob.fromJson(decoded);
+      if (job == null) return null;
+      if (job.senderId != senderId) return null;
+      return job;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> clearPendingUploadJob() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_pendingUploadKey);
   }
 
   /// Updates the transfer status, handling the case where `status` is a
@@ -577,8 +739,7 @@ class TransferService {
     try {
       await client
           .from('transfers')
-          .update({'status': desiredStatus})
-          .eq('id', transferId);
+          .update({'status': desiredStatus}).eq('id', transferId);
     } on PostgrestException catch (e) {
       // 22P02 = invalid_text_representation (enum value not found)
       if (e.code == '22P02') {
@@ -588,8 +749,7 @@ class TransferService {
         try {
           await client
               .from('transfers')
-              .update({'status': fallback})
-              .eq('id', transferId);
+              .update({'status': fallback}).eq('id', transferId);
         } catch (_) {
           // Status update is non-critical — the files are already uploaded
         }
@@ -607,11 +767,34 @@ class TransferService {
       await SupabaseConfig.client.from('transfer_files').insert(data);
     } on PostgrestException catch (e) {
       if (e.code == '42703' || e.code == 'PGRST204') {
-        final fallback = Map<String, dynamic>.from(data)
-          ..remove('sha256_hash');
+        final fallback = Map<String, dynamic>.from(data)..remove('sha256_hash');
         await SupabaseConfig.client.from('transfer_files').insert(fallback);
       } else {
         rethrow;
+      }
+    }
+  }
+
+  static Future<void> _triggerIncomingTransferPush({
+    required String transferId,
+    required String senderId,
+    required String receiverId,
+  }) async {
+    try {
+      await SupabaseConfig.client.functions.invoke(
+        'send-transfer-fcm',
+        body: {
+          'record': {
+            'id': transferId,
+            'sender_id': senderId,
+            'receiver_id': receiverId,
+          },
+        },
+      );
+    } catch (e) {
+      // Push notification should never fail the transfer itself.
+      if (kDebugMode) {
+        debugPrint('FCM trigger failed for transfer $transferId: $e');
       }
     }
   }
@@ -704,38 +887,113 @@ class TransferService {
         .createSignedUrl(storagePath, 3600);
 
     final httpClient = HttpClient();
+    IOSink? sink;
+    final tempDir = await getTemporaryDirectory();
+    // Prefix with random to avoid collisions when multiple files have the same name
+    final uniquePrefix =
+        '${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(99999)}';
+    final file =
+        File('${tempDir.path}/${uniquePrefix}_${sanitizeFileName(fileName)}');
+
+    const maxAttempts = 3;
+    var lastError = 'Download failed';
+
     try {
-      final request = await httpClient.getUrl(Uri.parse(url));
-      final response = await request.close();
-      final totalBytes = response.contentLength;
-      var receivedBytes = 0;
-
-      final tempDir = await getTemporaryDirectory();
-      // Prefix with random to avoid collisions when multiple files have the same name
-      final uniquePrefix =
-          '${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(99999)}';
-      final file =
-          File('${tempDir.path}/${uniquePrefix}_${sanitizeFileName(fileName)}');
-      final sink = file.openWrite();
-
-      await for (final chunk in response) {
+      for (var attempt = 1; attempt <= maxAttempts; attempt++) {
         if (cancellationToken?.isCancelled == true) {
-          await sink.close();
           if (await file.exists()) {
             await file.delete();
           }
           throw TransferCancelledException();
         }
-        sink.add(chunk);
-        receivedBytes += chunk.length;
-        // Guard against -1 content length (chunked transfer encoding)
-        final safeTotal = totalBytes > 0 ? totalBytes : receivedBytes;
-        onProgress(receivedBytes, safeTotal);
+
+        final existingBytes = await file.exists() ? await file.length() : 0;
+        HttpClientResponse? response;
+        try {
+          final request = await httpClient.getUrl(Uri.parse(url));
+          if (existingBytes > 0) {
+            request.headers
+                .set(HttpHeaders.rangeHeader, 'bytes=$existingBytes-');
+          }
+          response = await request.close();
+
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            throw HttpException('HTTP ${response.statusCode}');
+          }
+
+          // If server ignored range and returned full content, restart cleanly.
+          final appendMode = existingBytes > 0 &&
+              response.statusCode == HttpStatus.partialContent;
+          if (!appendMode && existingBytes > 0) {
+            await file.writeAsBytes(const <int>[], flush: true);
+          }
+
+          sink = file.openWrite(
+              mode: appendMode ? FileMode.append : FileMode.write);
+          var receivedBytes = appendMode ? existingBytes : 0;
+
+          // Prefer content-range total for resumed downloads.
+          int totalBytes = -1;
+          final contentRange =
+              response.headers.value(HttpHeaders.contentRangeHeader);
+          if (contentRange != null) {
+            final match =
+                RegExp(r'bytes\s+\d+-\d+/(\d+)').firstMatch(contentRange);
+            if (match != null) {
+              totalBytes = int.tryParse(match.group(1) ?? '') ?? -1;
+            }
+          }
+          if (totalBytes <= 0 && response.contentLength > 0) {
+            totalBytes = appendMode
+                ? existingBytes + response.contentLength
+                : response.contentLength;
+          }
+
+          await for (final chunk in response) {
+            if (cancellationToken?.isCancelled == true) {
+              await sink?.close();
+              sink = null;
+              if (await file.exists()) {
+                await file.delete();
+              }
+              throw TransferCancelledException();
+            }
+
+            sink!.add(chunk);
+            receivedBytes += chunk.length;
+            final safeTotal = totalBytes > 0 ? totalBytes : receivedBytes;
+            onProgress(receivedBytes, safeTotal);
+          }
+
+          await sink?.close();
+          sink = null;
+          return file;
+        } catch (e) {
+          await sink?.close();
+          sink = null;
+          lastError = e.toString().replaceAll('Exception: ', '');
+
+          if (cancellationToken?.isCancelled == true) {
+            if (await file.exists()) {
+              await file.delete();
+            }
+            throw TransferCancelledException();
+          }
+
+          final isLastAttempt = attempt >= maxAttempts;
+          if (isLastAttempt) break;
+
+          await Future.delayed(Duration(seconds: attempt * 2));
+        }
       }
 
-      await sink.close();
-      return file;
+      if (await file.exists()) {
+        await file.delete();
+      }
+      throw Exception(
+          'Download failed after $maxAttempts attempts: $lastError');
     } finally {
+      await sink?.close();
       httpClient.close();
     }
   }

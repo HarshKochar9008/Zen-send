@@ -64,4 +64,9 @@ skills-lock.json
 # Gradle cache
 android/.gradle/
 
-# 
+# Local cache directories
+.gradle_user_home/
+supabase/.temp/
+
+# Firebase service account keys
+android/app/*firebase-adminsdk*.json

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide UserIdentity;
 
@@ -14,29 +16,46 @@ class ReceivedTabScreen extends StatefulWidget {
   State<ReceivedTabScreen> createState() => _ReceivedTabScreenState();
 }
 
-class _ReceivedTabScreenState extends State<ReceivedTabScreen> {
+class _ReceivedTabScreenState extends State<ReceivedTabScreen>
+    with WidgetsBindingObserver {
   List<Map<String, dynamic>>? _transfers;
   bool _loading = true;
   String? _error;
   RealtimeChannel? _channel;
+  Timer? _realtimeHealthTimer;
+  DateTime _lastRealtimeSignalAt = DateTime.now().toUtc();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadTransfers();
     _subscribeToRealtime();
+    _startRealtimeHealthChecks();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _realtimeHealthTimer?.cancel();
     if (_channel != null) TransferService.unsubscribe(_channel!);
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _loadTransfers();
+      _ensureRealtimeHealthy(forceResubscribe: true);
+    }
+  }
+
   void _subscribeToRealtime() {
+    _lastRealtimeSignalAt = DateTime.now().toUtc();
     _channel = TransferService.subscribeToIncoming(
       userId: widget.identity.id,
       onNewTransfer: (record) {
+        _lastRealtimeSignalAt = DateTime.now().toUtc();
         _loadTransfers();
         if (mounted) {
           final status = record['status'] as String? ?? 'pending';
@@ -54,6 +73,26 @@ class _ReceivedTabScreenState extends State<ReceivedTabScreen> {
         }
       },
     );
+  }
+
+  void _startRealtimeHealthChecks() {
+    _realtimeHealthTimer?.cancel();
+    _realtimeHealthTimer = Timer.periodic(
+        const Duration(seconds: 45), (_) => _ensureRealtimeHealthy());
+  }
+
+  Future<void> _ensureRealtimeHealthy({bool forceResubscribe = false}) async {
+    final staleFor = DateTime.now().toUtc().difference(_lastRealtimeSignalAt);
+    final stale = staleFor > const Duration(minutes: 3);
+    if (!forceResubscribe && !stale && _channel != null) return;
+
+    final old = _channel;
+    _channel = null;
+    if (old != null) {
+      await TransferService.unsubscribe(old);
+    }
+    if (!mounted) return;
+    _subscribeToRealtime();
   }
 
   Future<void> _loadTransfers() async {
@@ -112,8 +151,7 @@ class _ReceivedTabScreenState extends State<ReceivedTabScreen> {
               children: [
                 ClipRRect(
                   borderRadius: BorderRadius.circular(10),
-                  child:
-                      Image.asset('assets/logo.png', width: 32, height: 32),
+                  child: Image.asset('assets/logo.png', width: 32, height: 32),
                 ),
                 const SizedBox(width: 10),
                 const Text(
@@ -146,14 +184,12 @@ class _ReceivedTabScreenState extends State<ReceivedTabScreen> {
                 const SizedBox(width: 8),
                 IconButton(
                   icon: Icon(Icons.refresh_rounded,
-                      color:
-                          AppColors.onSurfaceVariant.withValues(alpha: 0.5)),
+                      color: AppColors.onSurfaceVariant.withValues(alpha: 0.5)),
                   onPressed: _loadTransfers,
                 ),
               ],
             ),
           ),
-
           if (_channel != null)
             Padding(
               padding: const EdgeInsets.only(left: 20, bottom: 12),
@@ -180,7 +216,6 @@ class _ReceivedTabScreenState extends State<ReceivedTabScreen> {
                 ],
               ),
             ),
-
           Expanded(
             child: _loading
                 ? Center(
@@ -274,8 +309,7 @@ class _ReceivedTabScreenState extends State<ReceivedTabScreen> {
               borderRadius: BorderRadius.circular(20),
             ),
             child: Icon(Icons.download_rounded,
-                size: 36,
-                color: AppColors.primary.withValues(alpha: 0.4)),
+                size: 36, color: AppColors.primary.withValues(alpha: 0.4)),
           ),
           const SizedBox(height: 20),
           const Text(
@@ -380,7 +414,8 @@ class _ReceivedCard extends StatelessWidget {
         decoration: BoxDecoration(
           color: AppColors.cardBg,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: AppColors.cardBorder.withValues(alpha: 0.6)),
+          border:
+              Border.all(color: AppColors.cardBorder.withValues(alpha: 0.6)),
         ),
         child: Row(
           children: [
@@ -432,8 +467,8 @@ class _ReceivedCard extends StatelessWidget {
                       Text(
                         _statusLabel(),
                         style: TextStyle(
-                          color: AppColors.onSurfaceVariant
-                              .withValues(alpha: 0.6),
+                          color:
+                              AppColors.onSurfaceVariant.withValues(alpha: 0.6),
                           fontSize: 12,
                           fontWeight: FontWeight.w500,
                         ),

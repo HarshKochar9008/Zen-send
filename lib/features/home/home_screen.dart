@@ -151,11 +151,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
         ),
         const Spacer(),
-        IconButton(
-          onPressed: () {},
-          icon: const Icon(Icons.settings_rounded,
-              color: Color.fromARGB(255, 255, 255, 255), size: 22),
-        ),
       ],
     );
   }
@@ -362,7 +357,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   color: const Color(0xFF3366FF), size: 22),
             ],
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 2),
           Row(
             crossAxisAlignment: CrossAxisAlignment.baseline,
             textBaseline: TextBaseline.alphabetic,

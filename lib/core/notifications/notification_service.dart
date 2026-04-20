@@ -15,10 +15,22 @@ class NotificationService {
       FlutterLocalNotificationsPlugin();
   static bool _available = false;
   static String? _userId;
+  static bool _initializing = false;
+  static Future<void>? _initializeFuture;
 
   static void setUserId(String? id) => _userId = id;
 
   static Future<void> initialize() async {
+    if (_available) return;
+    if (_initializeFuture != null) return _initializeFuture!;
+    _initializing = true;
+    _initializeFuture = _initializeInternal();
+    await _initializeFuture;
+    _initializing = false;
+    _initializeFuture = null;
+  }
+
+  static Future<void> _initializeInternal() async {
     try {
       if (!kIsWeb && Platform.isAndroid) {
         final status = await Permission.notification.request();
@@ -143,7 +155,11 @@ class NotificationService {
   }
 
   static Future<void> syncFcmToken(String userId) async {
-    if (!_available) return;
+    // Ensure initialization is started, but do not fail token sync if local
+    // notification setup had issues. FCM token can still be available.
+    if (!_available && !_initializing) {
+      await initialize();
+    }
     try {
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null || token.isEmpty) return;

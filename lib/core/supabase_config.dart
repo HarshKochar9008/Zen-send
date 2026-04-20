@@ -4,15 +4,32 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'constants.dart';
 
 Future<void> initSupabase() async {
-  if (AppConstants.supabaseUrl.isEmpty || AppConstants.supabaseAnonKey.isEmpty) {
+  final url = AppConstants.supabaseUrl;
+  final key = AppConstants.supabaseAnonKey;
+  if (url.isEmpty || key.isEmpty) {
     throw StateError(
       'Missing Supabase config. Pass --dart-define=SUPABASE_URL=... '
       'and --dart-define=SUPABASE_ANON_KEY=...',
     );
   }
+
+  final parsed = Uri.tryParse(url);
+  final malformed = parsed == null ||
+      url.contains(' ') ||
+      parsed.scheme != 'https' ||
+      parsed.host.isEmpty ||
+      !parsed.host.endsWith('.supabase.co');
+  if (malformed) {
+    throw StateError(
+      'Invalid SUPABASE_URL: "$url". '
+      'Use format: https://<project-ref>.supabase.co '
+      '(no spaces, exact project ref).',
+    );
+  }
+
   await Supabase.initialize(
-    url: AppConstants.supabaseUrl,
-    anonKey: AppConstants.supabaseAnonKey,
+    url: url,
+    anonKey: key,
   );
 }
 

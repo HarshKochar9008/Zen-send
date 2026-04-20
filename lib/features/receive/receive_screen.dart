@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:battery_plus/battery_plus.dart';
 import 'package:disk_space_plus/disk_space_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/constants.dart';
 import '../../core/theme.dart';
 import '../transfer/transfer_service.dart';
 import 'save_file.dart';
@@ -20,20 +22,53 @@ class ReceiveScreen extends StatefulWidget {
   State<ReceiveScreen> createState() => _ReceiveScreenState();
 }
 
-class _ReceiveScreenState extends State<ReceiveScreen> {
+class _ReceiveScreenState extends State<ReceiveScreen>
+    with WidgetsBindingObserver {
   static const _downloadedKeysPrefix = 'downloaded_files_';
+  static const int _storageSafetyBufferBytes = 50 * 1024 * 1024; // 50 MB
+  final Battery _battery = Battery();
   List<Map<String, dynamic>>? _files;
   bool _loading = true;
   String? _loadError;
   final Map<String, _FileDownloadState> _dlStates = {};
   final Map<String, TransferCancellationToken> _downloadTokens = {};
   Set<String> _persistedDownloads = {};
+  bool _powerSaveMode = false;
+  int? _batteryLevel;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refreshPowerSaveMode();
     _loadPersistedState();
     _loadFiles();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refreshPowerSaveMode();
+    }
+  }
+
+  Future<void> _refreshPowerSaveMode() async {
+    final enabled = await _isPowerSaveModeEnabled();
+    int? level;
+    try {
+      level = await _battery.batteryLevel;
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _powerSaveMode = enabled;
+      _batteryLevel = level;
+    });
   }
 
   Future<void> _loadPersistedState() async {
@@ -69,8 +104,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       _loadError = null;
     });
     try {
-      final files =
-          await TransferService.getTransferFiles(widget.transferId);
+      final files = await TransferService.getTransferFiles(widget.transferId);
       if (mounted) {
         setState(() {
           _files = files;
@@ -93,6 +127,146 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     return TransferService.formatFileSize(b);
   }
 
+  Future<bool> _isPowerSaveModeEnabled() async {
+    try {
+      return await _battery.isInBatterySaveMode;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _confirmPowerSaveIfNeeded(int fileSize) async {
+    if (fileSize < AppConstants.cellularWarnThresholdBytes) return true;
+    final powerSave = await _isPowerSaveModeEnabled();
+    if (!powerSave || !mounted) return true;
+
+    final approved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.cardBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Battery saver is on',
+          style: TextStyle(color: AppColors.onSurface, fontSize: 16),
+        ),
+        content: Text(
+          'This file is ${TransferService.formatFileSize(fileSize)}. '
+          'Power-save mode can pause or throttle long downloads. Continue anyway?',
+          style: TextStyle(
+            color: AppColors.onSurfaceVariant.withValues(alpha: 0.8),
+            fontSize: 13,
+            height: 1.4,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+    return approved ?? false;
+  }
+
+  Future<bool> _hasAggregateStorageForPendingDownloads() async {
+    final files = _files;
+    if (files == null || files.isEmpty) return true;
+
+    var requiredBytes = 0;
+    for (final file in files) {
+      final fileId = file['id'] as String;
+      final state = _dlStates[fileId]?.status;
+      if (_persistedDownloads.contains(fileId) ||
+          state == _DownloadStatus.completed) {
+        continue;
+      }
+      final rawSize = file['file_size'];
+      requiredBytes += rawSize is int ? rawSize : int.tryParse('$rawSize') ?? 0;
+    }
+
+    if (requiredBytes <= 0) return true;
+
+    final freeSpaceGb = await DiskSpacePlus().getFreeDiskSpace ?? 0.0;
+    final freeSpaceBytes = (freeSpaceGb * 1024 * 1024 * 1024).toInt();
+    return freeSpaceBytes >= (requiredBytes + _storageSafetyBufferBytes);
+  }
+
+  Widget _buildPowerSaveBanner() {
+    if (!_powerSaveMode) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.battery_saver_rounded,
+            size: 16,
+            color: AppColors.warning.withValues(alpha: 0.9),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Battery saver is on. Large downloads may be slower or pause.',
+              style: TextStyle(
+                color: AppColors.onSurfaceVariant.withValues(alpha: 0.85),
+                fontSize: 12,
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBatteryBadge() {
+    final levelText = _batteryLevel != null ? '${_batteryLevel!}%' : '--%';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: (_powerSaveMode ? AppColors.warning : AppColors.primary)
+            .withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: (_powerSaveMode ? AppColors.warning : AppColors.primary)
+              .withValues(alpha: 0.35),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            _powerSaveMode
+                ? Icons.battery_saver_rounded
+                : Icons.battery_std_rounded,
+            size: 14,
+            color: (_powerSaveMode ? AppColors.warning : AppColors.primary)
+                .withValues(alpha: 0.95),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            levelText,
+            style: TextStyle(
+              color: AppColors.onSurfaceVariant.withValues(alpha: 0.9),
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _downloadFile(Map<String, dynamic> file) async {
     final fileId = file['id'] as String;
     final storagePath = file['storage_path'] as String;
@@ -105,13 +279,27 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
     final rawSize = file['file_size'];
     final fileSize = rawSize is int ? rawSize : int.tryParse('$rawSize') ?? 0;
-    final freeSpaceGb = await DiskSpacePlus().getFreeDiskSpace ?? 0.0;
-    final freeSpaceBytes = (freeSpaceGb * 1024 * 1024 * 1024).toInt();
-    if (fileSize > 0 && freeSpaceBytes > 0 && freeSpaceBytes < fileSize) {
+    final powerApproved = await _confirmPowerSaveIfNeeded(fileSize);
+    if (!powerApproved) {
       if (mounted) {
         setState(() => _dlStates[fileId] = const _FileDownloadState(
               status: _DownloadStatus.failed,
-              error: 'Not enough free device storage for this file',
+              error: 'Download postponed due to battery saver mode',
+            ));
+      }
+      return;
+    }
+
+    final freeSpaceGb = await DiskSpacePlus().getFreeDiskSpace ?? 0.0;
+    final freeSpaceBytes = (freeSpaceGb * 1024 * 1024 * 1024).toInt();
+    if (fileSize > 0 &&
+        freeSpaceBytes > 0 &&
+        freeSpaceBytes < (fileSize + _storageSafetyBufferBytes)) {
+      if (mounted) {
+        setState(() => _dlStates[fileId] = _FileDownloadState(
+              status: _DownloadStatus.failed,
+              error:
+                  'Not enough free storage. Need ${TransferService.formatFileSize(fileSize + _storageSafetyBufferBytes)} including safety buffer.',
             ));
       }
       return;
@@ -228,6 +416,23 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
   Future<void> _downloadAll() async {
     if (_files == null || _files!.isEmpty) return;
+    final aggregateOk = await _hasAggregateStorageForPendingDownloads();
+    if (!aggregateOk) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Not enough free storage for all pending files. '
+              'Download fewer files or free up space first.',
+            ),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: AppColors.snackBarBg,
+          ),
+        );
+      }
+      return;
+    }
+
     for (final file in _files!) {
       final fileId = file['id'] as String;
       final state = _dlStates[fileId];
@@ -241,8 +446,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   Widget build(BuildContext context) {
     final allCompleted = _files != null &&
         _files!.isNotEmpty &&
-        _files!.every((f) =>
-            _dlStates[f['id']]?.status == _DownloadStatus.completed);
+        _files!.every(
+            (f) => _dlStates[f['id']]?.status == _DownloadStatus.completed);
 
     return Scaffold(
       body: SafeArea(
@@ -250,8 +455,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
           children: [
             // Header
             Padding(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 20, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
               child: Row(
                 children: [
                   GestureDetector(
@@ -262,8 +466,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                   const SizedBox(width: 12),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(10),
-                    child: Image.asset('assets/logo.png',
-                        width: 32, height: 32),
+                    child:
+                        Image.asset('assets/logo.png', width: 32, height: 32),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
@@ -277,18 +481,18 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                       ),
                     ),
                   ),
-                  if (_files != null &&
-                      _files!.isNotEmpty &&
-                      !allCompleted)
+                  _buildBatteryBadge(),
+                  const SizedBox(width: 8),
+                  if (_files != null && _files!.isNotEmpty && !allCompleted)
                     TextButton.icon(
                       onPressed: _downloadAll,
-                      icon:
-                          const Icon(Icons.download_rounded, size: 16),
+                      icon: const Icon(Icons.download_rounded, size: 16),
                       label: const Text('All'),
                     ),
                 ],
               ),
             ),
+            _buildPowerSaveBanner(),
 
             // Content
             Expanded(
@@ -299,8 +503,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                         height: 24,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          color:
-                              AppColors.primary.withValues(alpha: 0.6),
+                          color: AppColors.primary.withValues(alpha: 0.6),
                         ),
                       ),
                     )
@@ -350,13 +553,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                                 final dlState = _dlStates[fileId];
 
                                 return _FileDownloadTile(
-                                  fileName:
-                                      file['file_name'] as String,
-                                  fileSize:
-                                      _formatSize(file['file_size']),
+                                  fileName: file['file_name'] as String,
+                                  fileSize: _formatSize(file['file_size']),
                                   state: dlState,
-                                  onDownload: () =>
-                                      _downloadFile(file),
+                                  onDownload: () => _downloadFile(file),
                                   onCancel: () => _cancelDownload(fileId),
                                 );
                               },
@@ -454,8 +654,8 @@ class _FileDownloadTile extends StatelessWidget {
                     Text(
                       fileSize,
                       style: TextStyle(
-                        color: AppColors.onSurfaceVariant
-                            .withValues(alpha: 0.4),
+                        color:
+                            AppColors.onSurfaceVariant.withValues(alpha: 0.4),
                         fontSize: 11,
                       ),
                     ),
@@ -466,7 +666,6 @@ class _FileDownloadTile extends StatelessWidget {
               _buildTrailing(status),
             ],
           ),
-
           if (status == _DownloadStatus.downloading) ...[
             const SizedBox(height: 12),
             ClipRRect(
@@ -475,8 +674,7 @@ class _FileDownloadTile extends StatelessWidget {
                 value: state!.progress,
                 backgroundColor:
                     AppColors.outlineVariant.withValues(alpha: 0.15),
-                valueColor:
-                    const AlwaysStoppedAnimation(AppColors.primary),
+                valueColor: const AlwaysStoppedAnimation(AppColors.primary),
                 minHeight: 3,
               ),
             ),
@@ -484,13 +682,11 @@ class _FileDownloadTile extends StatelessWidget {
             Text(
               'Downloading… ${(state!.progress * 100).toInt()}%',
               style: TextStyle(
-                color:
-                    AppColors.onSurfaceVariant.withValues(alpha: 0.4),
+                color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
                 fontSize: 11,
               ),
             ),
           ],
-
           if (status == _DownloadStatus.verifying) ...[
             const SizedBox(height: 8),
             Text(
@@ -501,7 +697,6 @@ class _FileDownloadTile extends StatelessWidget {
               ),
             ),
           ],
-
           if (status == _DownloadStatus.saving) ...[
             const SizedBox(height: 8),
             Text(
@@ -512,7 +707,6 @@ class _FileDownloadTile extends StatelessWidget {
               ),
             ),
           ],
-
           if (status == _DownloadStatus.completed) ...[
             const SizedBox(height: 8),
             Row(
@@ -525,22 +719,19 @@ class _FileDownloadTile extends StatelessWidget {
                   Text(
                     'SHA-256 verified',
                     style: TextStyle(
-                      color:
-                          AppColors.success.withValues(alpha: 0.7),
+                      color: AppColors.success.withValues(alpha: 0.7),
                       fontSize: 11,
                     ),
                   ),
                 ] else ...[
                   Icon(Icons.check_circle_outline,
-                      color: AppColors.onSurfaceVariant
-                          .withValues(alpha: 0.4),
+                      color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
                       size: 12),
                   const SizedBox(width: 4),
                   Text(
                     'Saved',
                     style: TextStyle(
-                      color: AppColors.onSurfaceVariant
-                          .withValues(alpha: 0.4),
+                      color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
                       fontSize: 11,
                     ),
                   ),
@@ -554,21 +745,17 @@ class _FileDownloadTile extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: AppColors.outlineVariant
-                      .withValues(alpha: 0.5),
+                  color: AppColors.outlineVariant.withValues(alpha: 0.5),
                   fontSize: 10,
                 ),
               ),
             ],
           ],
-
-          if (status == _DownloadStatus.failed &&
-              state?.error != null) ...[
+          if (status == _DownloadStatus.failed && state?.error != null) ...[
             const SizedBox(height: 8),
             Text(
               state!.error!,
-              style: const TextStyle(
-                  color: AppColors.error, fontSize: 11),
+              style: const TextStyle(color: AppColors.error, fontSize: 11),
             ),
           ],
         ],

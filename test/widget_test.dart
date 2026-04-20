@@ -113,8 +113,8 @@ void main() {
       expect(AppConstants.codeLength, lessThanOrEqualTo(8));
     });
 
-    test('max file size is 1 GB', () {
-      expect(AppConstants.maxFileSizeBytes, equals(1024 * 1024 * 1024));
+    test('max file size is 100 MB', () {
+      expect(AppConstants.maxFileSizeBytes, equals(100 * 1024 * 1024));
     });
 
     test('max files per transfer is reasonable', () {
@@ -124,6 +124,15 @@ void main() {
 
     test('transfer TTL is defined', () {
       expect(AppConstants.transferTtlHours, greaterThan(0));
+    });
+
+    test('short code format validator rejects ambiguous characters', () {
+      expect(AppConstants.isValidShortCodeFormat('ABC2K9'), isTrue);
+      expect(AppConstants.isValidShortCodeFormat('abC2k9'), isTrue);
+      expect(AppConstants.isValidShortCodeFormat('ABC0K9'), isFalse);
+      expect(AppConstants.isValidShortCodeFormat('ABCIK9'), isFalse);
+      expect(AppConstants.isValidShortCodeFormat('ABCLK9'), isFalse);
+      expect(AppConstants.isValidShortCodeFormat('ABC1K9'), isFalse);
     });
   });
 }

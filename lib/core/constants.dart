@@ -1,6 +1,10 @@
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class AppConstants {
+  static final RegExp _shortCodePattern = RegExp(
+    '^[$codeAlphabet]{$codeLength}\$',
+  );
+
   static String _cleanEnvValue(String value) {
     final trimmed = value.trim();
     if (trimmed.length >= 2) {
@@ -34,8 +38,9 @@ class AppConstants {
   static const codeLength = 6;
 
   // File limits
-  static const maxFileSizeBytes = 1024 * 1024 * 1024; // 1 GB
+  static const maxFileSizeBytes = 100 * 1024 * 1024; // 100 MB
   static const maxFilesPerTransfer = 20;
+  static const cellularWarnThresholdBytes = 100 * 1024 * 1024; // 100 MB
 
   // Transfer TTL
   static const transferTtlHours = 24;
@@ -46,4 +51,10 @@ class AppConstants {
   // SharedPreferences keys
   static const prefShortCode = 'short_code';
   static const prefUserDbId = 'user_db_id';
+  static const prefAuthUid = 'auth_uid';
+
+  static String normalizeShortCode(String value) => value.trim().toUpperCase();
+
+  static bool isValidShortCodeFormat(String value) =>
+      _shortCodePattern.hasMatch(normalizeShortCode(value));
 }

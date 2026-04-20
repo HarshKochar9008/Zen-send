@@ -89,6 +89,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const SizedBox(height: 16),
             _buildProfileCard(context),
+            const SizedBox(height: 10),
+            _buildIdentityPersistenceNote(),
             const SizedBox(height: 24),
             const Text(
               'PREFERENCES',
@@ -224,6 +226,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _buildIdentityPersistenceNote() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppColors.cardBg,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.cardBorder.withValues(alpha: 0.6)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.info_outline_rounded,
+            size: 18,
+            color: AppColors.onSurfaceVariant.withValues(alpha: 0.8),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Your code stays the same while you keep this app.',
+              style: TextStyle(
+                color: AppColors.onSurfaceVariant.withValues(alpha: 0.85),
+                fontSize: 12,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   List<Widget> _buildSettingsTiles(List<_SettingsItem> items) {
     return [
       for (int i = 0; i < items.length; i++) ...[
@@ -267,7 +302,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Dark Mode',
+                  'Theme',
                   style: TextStyle(
                     fontWeight: FontWeight.w600,
                     fontSize: 14,

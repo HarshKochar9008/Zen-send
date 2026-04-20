@@ -259,7 +259,7 @@ class _BottomNavBar extends StatelessWidget {
   const _BottomNavBar({required this.currentIndex, required this.onTap});
 
   static const _items = [
-    _NavItem(icon: Icons.cloud_upload_rounded, label: 'Home'),
+    _NavItem(icon: Icons.home_rounded, label: 'Home'),
     _NavItem(icon: Icons.download_rounded, label: 'Received'),
     _NavItem(icon: Icons.history_rounded, label: 'History'),
     _NavItem(icon: Icons.settings_rounded, label: 'Settings'),
