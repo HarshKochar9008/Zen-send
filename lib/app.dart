@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'core/theme.dart';
+import 'core/navigation/root_navigator.dart';
 import 'core/notifications/notification_service.dart';
+import 'core/theme.dart';
 import 'features/home/home_screen.dart';
 import 'features/history/history_screen.dart';
 import 'features/settings/settings_screen.dart';
@@ -17,6 +18,7 @@ class ZenSendApp extends StatelessWidget {
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: ThemeController.themeMode,
       builder: (context, themeMode, _) => MaterialApp(
+        navigatorKey: rootNavigatorKey,
         title: 'ZenSend',
         debugShowCheckedModeBanner: false,
         theme: buildAppTheme(),
@@ -73,7 +75,7 @@ class MainShell extends StatefulWidget {
   State<MainShell> createState() => _MainShellState();
 }
 
-class _MainShellState extends State<MainShell> {
+class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   int _currentIndex = 0;
   UserIdentity? _identity;
   bool _loading = true;
@@ -82,7 +84,22 @@ class _MainShellState extends State<MainShell> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    NotificationService.handleLaunchAndPendingNavigation();
     _loadIdentity();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _identity != null) {
+      NotificationService.syncFcmToken(_identity!.id);
+    }
   }
 
   Future<void> _loadIdentity() async {
@@ -93,7 +110,9 @@ class _MainShellState extends State<MainShell> {
     try {
       final identity = await IdentityService.initialize();
       if (mounted) {
+        NotificationService.setUserId(identity.id);
         await NotificationService.syncFcmToken(identity.id);
+        NotificationService.handleLaunchAndPendingNavigation();
         setState(() {
           _identity = identity;
           _loading = false;

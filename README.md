@@ -75,11 +75,11 @@ lib/
 
 ### Transfer Engine
 
-- **Streaming upload** — files are read from disk and streamed directly to Supabase Storage via `HttpClient.addStream()`. The full file is never loaded into RAM. Handles large files without OOM.
+- **Resumable TUS upload** — uploads use Supabase’s TUS endpoint (`*.storage.supabase.co/storage/v1/upload/resumable`) with **6 MiB chunks** (Supabase requirement) and a persistent fingerprint store so interrupted uploads **resume from the last confirmed offset** instead of restarting from byte 0. Falls back to a single streaming `POST` if TUS is unavailable (404/405/501).
 - **Streaming download** — files are downloaded chunk-by-chunk and written directly to a temp file on disk. No in-memory accumulation. Handles `-1` content length (chunked transfer encoding) gracefully.
 - **SHA-256 integrity** — computed before upload using chunked `file.openRead()` (constant memory). After download, the hash is recomputed and compared. Mismatches are surfaced in the UI with clear error messages.
 - **Per-file + aggregate progress** — sender sees individual progress bars (hashing %, uploading %) and an aggregate counter. Receiver sees per-file download progress.
-- **Automatic retry** — each file upload retries up to 3 times with exponential backoff (2s, 4s, 6s). Retry count is visible in the UI.
+- **Automatic retry** — TUS client performs many internal resume/retry cycles; the UI still shows an outer attempt counter for rare hard failures (up to 3 outer passes).
 - **File size validation** — rejects files exceeding the configured limit (default 1GB) before upload begins.
 - **File name sanitization** — strips path traversal characters (`..`, `<>`, pipe, wildcards) before constructing storage paths.
 - **Collision-safe temp files** — downloads use timestamped random prefixes to prevent overwriting when multiple files share the same name.
@@ -215,14 +215,12 @@ Supabase Dashboard → Database → Replication → Enable Realtime for the `tra
 
 #### 5b. Push Notifications (Incoming while app closed)
 
-1. Add Firebase config files:
-   - Android: `android/app/google-services.json`
-   - iOS: `ios/Runner/GoogleService-Info.plist`
-2. Ensure `users.fcm_token` exists (see schema above).
-3. Add a server-side trigger (Edge Function / webhook) that sends an FCM message when a transfer is created for `receiver_id`.
-4. App behavior:
-   - foreground: in-app local notification
-   - background/terminated: OS push notification wakes the app shell and alerts the user
+1. **Replace** the checked-in Android placeholder with your real Firebase Android app file:
+   - Firebase Console → Project settings → Your apps → Android (`com.ZenSend.share`) → download `google-services.json` → `android/app/google-services.json`
+   - iOS: add `ios/Runner/GoogleService-Info.plist` from the same console (enable Push Notifications + Background Modes → Remote notifications in Xcode).
+2. Ensure `users.fcm_token` exists (see schema above). The app registers `FirebaseMessaging.onBackgroundMessage` **before** `Firebase.initializeApp()`, requests Android 13+ notification permission, creates the `incoming_transfers` channel, shows **data-only** pushes in the background isolate, and merges **notification + data** payloads for deep-linking (`transfer_id`, `sender_code`).
+3. **Deploy the included Edge Function** `supabase/functions/send-transfer-fcm/` (FCM HTTP v1). Set secrets `FCM_PROJECT_ID` and `FCM_SERVICE_ACCOUNT_JSON` (Firebase service account JSON with *Firebase Cloud Messaging API Admin*). Create a **Database Webhook** on `transfers` **INSERT** → `POST` your function URL (see comments in `index.ts`).
+4. **FCM payload contract** (what the function already sends): `data.transfer_id`, `data.sender_code`, plus `notification.title/body` for system tray display on Android/iOS.
 
 #### 6. RLS Policies (Database Tables)
 
@@ -311,19 +309,18 @@ flutter test
 - **Recipient offline:** accepted. Upload succeeds to cloud relay, recipient can download later.
 - **Transfer TTL:** 24 hours (`AppConstants.transferTtlHours`). Expired transfers are hidden/marked expired.
 - **Invalid recipient code:** rejected before upload starts with an inline error.
-- **Network drop mid-upload:** client retries automatically (up to 3 attempts). If retries fail, transfer marks file as failed with actionable error text.
+- **Network drop mid-upload:** uploads use **Supabase TUS** (chunked, resumable). Transient failures retry within the TUS session; outer attempts still cap at 3 for catastrophic errors. If all attempts fail, the file is marked failed with actionable error text.
 - **Upload/download cancel:** user can cancel in-progress operations from UI.
 - **Storage pressure:** receiver checks free disk space before download; if insufficient, download is blocked with a clear message.
-- **Incoming while app closed:** push notifications via FCM/APNs are integrated. Recipient receives OS notification and opens app to download.
+- **Incoming while app closed:** FCM + local notifications (foreground + background/terminated data messages) and tap-to-open navigation to `ReceiveScreen` when `transfer_id` is present. Requires real Firebase project files + deployed `send-transfer-fcm` webhook.
 
 ## Known Limitations
 
 | Area | Limitation | Path to Fix |
 |------|-----------|-------------|
-| Push notifications backend | Client-side FCM/APNs is integrated. You still need backend trigger logic (Edge Function/DB trigger) to send notifications on new transfer. | Add Supabase Edge Function that sends FCM/APNs using stored device token |
+| Push delivery | You must deploy `send-transfer-fcm`, set `FCM_*` secrets, and wire a Database Webhook; placeholder `google-services.json` will not talk to your Firebase project until replaced. | Follow §5b |
 | Background transfers | Transfers run in the foreground. App kill = failed transfer. | Add `flutter_background_service` or `workmanager` |
 | Supabase Storage limits | Free tier: 50MB/file, 1GB total. Pro plan: 5GB/file. | Upgrade Supabase plan or implement chunked/tus uploads |
-| Resumable uploads | Retry restarts from byte 0, not from last position. | Implement tus protocol or byte-range resume |
 | Platform channels | Native share sheet implemented with `MethodChannel` (`zensend/native_share`) for Android and iOS. | Extend with native file picker (Pigeon) or MediaStore save channel |
 | Server-side TTL | TTL is enforced client-side only (24h cutoff in query). | Add Supabase cron/Edge Function to delete expired files |
 | Certificate pinning | Not implemented — relies on OS trust store. | Add `badCertificateCallback` to HttpClient for production |

@@ -1,12 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
+import 'package:cross_file/cross_file.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:mime/mime.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:tus_client_dart/tus_client_dart.dart';
 
 import '../../core/constants.dart';
 import '../../core/supabase_config.dart';
@@ -187,7 +190,119 @@ class TransferService {
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
-  // ── Streaming upload (avoids loading full file into RAM) ─────────────────
+  /// Supabase Storage TUS endpoint (direct storage hostname when possible).
+  static Uri _tusResumableUri() {
+    final u = Uri.parse(AppConstants.supabaseUrl);
+    final host = u.host;
+    if (host.endsWith('.supabase.co') && !host.contains('.storage.')) {
+      final projectRef = host.replaceAll('.supabase.co', '');
+      return Uri.parse(
+        'https://$projectRef.storage.supabase.co/storage/v1/upload/resumable',
+      );
+    }
+    return Uri(
+      scheme: u.scheme,
+      host: u.host,
+      port: u.hasPort ? u.port : null,
+      path: '/storage/v1/upload/resumable',
+    );
+  }
+
+  /// Resumable upload via TUS (6 MiB chunks, per Supabase). Falls back to a single POST stream if TUS is unavailable.
+  static Future<void> _uploadStorageFile({
+    required String storagePath,
+    required File file,
+    required String contentType,
+    void Function(int sent, int total)? onProgress,
+    TransferCancellationToken? cancellationToken,
+  }) async {
+    await SupabaseConfig.ensureValidSession();
+    final session = SupabaseConfig.client.auth.currentSession;
+    if (session == null) throw AuthenticationException();
+
+    final fileLength = await file.length();
+    Directory? workDir;
+    Timer? cancelTimer;
+    TusClient? tus;
+
+    Future<void> runTus() async {
+      final root = await getApplicationSupportDirectory();
+      workDir = Directory(
+        '${root.path}/tus/${storagePath.hashCode}_${fileLength}_${DateTime.now().microsecondsSinceEpoch}',
+      );
+      await workDir!.create(recursive: true);
+
+      tus = TusClient(
+        XFile(file.path),
+        store: TusFileStore(workDir!),
+        maxChunkSize: 6 * 1024 * 1024,
+        retries: 12,
+        retryInterval: 1,
+        retryScale: RetryScale.exponential,
+      );
+
+      cancelTimer = Timer.periodic(const Duration(milliseconds: 250), (_) async {
+        if (cancellationToken?.isCancelled == true) {
+          cancelTimer?.cancel();
+          try {
+            await tus?.cancelUpload();
+          } catch (_) {}
+        }
+      });
+
+      await tus!.upload(
+        uri: _tusResumableUri(),
+        headers: {
+          'Authorization': 'Bearer ${session.accessToken}',
+          'apikey': AppConstants.supabaseAnonKey,
+          'x-upsert': 'true',
+        },
+        metadata: {
+          'bucketName': 'transfers',
+          'objectName': storagePath,
+          'contentType': contentType,
+          'cacheControl': '3600',
+        },
+        onProgress: (percent, _) {
+          if (fileLength <= 0) return;
+          final sent = (fileLength * (percent / 100.0)).round().clamp(0, fileLength);
+          onProgress?.call(sent, fileLength);
+        },
+      );
+
+      if (cancellationToken?.isCancelled == true) {
+        throw TransferCancelledException();
+      }
+    }
+
+    try {
+      try {
+        await runTus();
+      } on ProtocolException catch (e) {
+        final code = e.code;
+        if (code == 404 || code == 405 || code == 501) {
+          await _streamUpload(
+            storagePath: storagePath,
+            file: file,
+            contentType: contentType,
+            onProgress: onProgress,
+            cancellationToken: cancellationToken,
+          );
+        } else {
+          rethrow;
+        }
+      }
+    } finally {
+      cancelTimer?.cancel();
+      try {
+        if (workDir != null && workDir!.existsSync()) {
+          await workDir!.delete(recursive: true);
+        }
+      } catch (_) {}
+    }
+  }
+
+  // ── Single-shot streaming upload (fallback, avoids loading full file into RAM) ─
 
   static Future<void> _streamUpload({
     required String storagePath,
@@ -364,7 +479,7 @@ class TransferService {
             );
             onProgress(states);
 
-            await _streamUpload(
+            await _uploadStorageFile(
               storagePath: storagePath,
               file: diskFile,
               contentType: mimeType,
