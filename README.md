@@ -1,6 +1,6 @@
 # ZenSend
 
-Real-time cross-device file sharing app built with Flutter and Supabase for the NeoSapien Flutter Developer Intern Assessment.
+Real-time mobile file sharing app (Android/iOS only) built with Flutter and Supabase for the NeoSapien Flutter Developer Intern Assessment.
 
 ## Architecture
 
@@ -8,7 +8,7 @@ Real-time cross-device file sharing app built with Flutter and Supabase for the 
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | Flutter 3.x (Dart) |
+| Frontend | Flutter 3.x (Dart, Android/iOS targets only) |
 | Auth | Supabase Anonymous Auth (no email/password/phone) |
 | Database | Supabase Postgres (users, transfers, transfer_files) |
 | Storage | Supabase Storage (bucket: `transfers`) |
@@ -313,6 +313,7 @@ flutter test
 - **Upload/download cancel:** user can cancel in-progress operations from UI.
 - **Storage pressure:** receiver checks free disk space before download; if insufficient, download is blocked with a clear message.
 - **Incoming while app closed:** FCM + local notifications (foreground + background/terminated data messages) and tap-to-open navigation to `ReceiveScreen` when `transfer_id` is present. Requires real Firebase project files + deployed `send-transfer-fcm` webhook.
+- **Closed-app delivery readiness gate:** before upload starts, sender runs a push `dry_run` health check (recipient token + function readiness). If not ready, send is blocked with an actionable message instead of silently delivering without closed-app notification.
 
 ## Known Limitations
 

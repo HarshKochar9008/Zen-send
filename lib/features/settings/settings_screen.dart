@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../../core/theme.dart';
 import '../identity/identity_service.dart';
 import '../onboarding/onboarding_screen.dart';
+import '../transfer/transfer_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   final UserIdentity identity;
@@ -15,12 +16,32 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _darkMode = ThemeController.themeMode.value == ThemeMode.dark;
+  bool _checkingPush = false;
+  PushReadinessResult? _pushReadiness;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshPushReadiness();
+  }
 
   Future<void> _setDarkMode(bool enabled) async {
     setState(() => _darkMode = enabled);
     await ThemeController.setThemeMode(
       enabled ? ThemeMode.dark : ThemeMode.light,
     );
+  }
+
+  Future<void> _refreshPushReadiness() async {
+    setState(() => _checkingPush = true);
+    final result = await TransferService.verifyClosedAppDeliveryReadiness(
+      receiverId: widget.identity.id,
+    );
+    if (!mounted) return;
+    setState(() {
+      _pushReadiness = result;
+      _checkingPush = false;
+    });
   }
 
   @override
@@ -91,6 +112,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _buildProfileCard(context),
             const SizedBox(height: 10),
             _buildIdentityPersistenceNote(),
+            const SizedBox(height: 10),
+            _buildPushReadinessCard(),
             const SizedBox(height: 24),
             const Text(
               'PREFERENCES',
@@ -252,6 +275,76 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 fontSize: 12,
                 height: 1.4,
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPushReadinessCard() {
+    final readiness = _pushReadiness;
+    final ready = readiness?.ready == true;
+    final title = _checkingPush
+        ? 'Checking push diagnostics...'
+        : ready
+            ? 'Closed-app delivery is ready'
+            : 'Closed-app delivery not ready';
+    final subtitle = _checkingPush
+        ? 'Verifying token and push relay health'
+        : ready
+            ? 'Incoming transfers can alert you when the app is closed.'
+            : (readiness?.reason ??
+                'Push pipeline is not fully configured yet.');
+    final icon = _checkingPush
+        ? Icons.sync_rounded
+        : ready
+            ? Icons.verified_rounded
+            : Icons.warning_amber_rounded;
+    final accent = _checkingPush
+        ? AppColors.primary
+        : ready
+            ? AppColors.success
+            : AppColors.warning;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppColors.cardBg,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.cardBorder.withValues(alpha: 0.6)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 18, color: accent.withValues(alpha: 0.9)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: AppColors.onSurface,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              TextButton(
+                onPressed: _checkingPush ? null : _refreshPushReadiness,
+                child: const Text('Refresh'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            subtitle,
+            style: TextStyle(
+              color: AppColors.onSurfaceVariant.withValues(alpha: 0.85),
+              fontSize: 12,
+              height: 1.4,
             ),
           ),
         ],

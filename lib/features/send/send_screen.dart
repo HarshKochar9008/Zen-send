@@ -443,6 +443,18 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
 
   Future<void> _send() async {
     if (_validatedRecipientId == null || _selectedFiles.isEmpty) return;
+    final pushReadiness = await TransferService.verifyClosedAppDeliveryReadiness(
+      receiverId: _validatedRecipientId!,
+    );
+    if (!pushReadiness.ready) {
+      if (!mounted) return;
+      setState(() {
+        _error = pushReadiness.reason ??
+            'Incoming delivery while recipient app is closed is not configured yet.';
+      });
+      return;
+    }
+
     final powerApproved = await _confirmPowerSaveUploadIfNeeded();
     if (!powerApproved || !mounted) return;
     final confirmed = await _confirmMeteredUploadIfNeeded();

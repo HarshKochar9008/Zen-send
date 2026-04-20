@@ -207,6 +207,16 @@ class StorageUploadException implements Exception {
   String toString() => 'Upload failed ($statusCode): $details';
 }
 
+class PushReadinessResult {
+  final bool ready;
+  final String? reason;
+
+  const PushReadinessResult({
+    required this.ready,
+    this.reason,
+  });
+}
+
 class TransferCancellationToken {
   bool _cancelled = false;
   bool get isCancelled => _cancelled;
@@ -796,6 +806,81 @@ class TransferService {
       if (kDebugMode) {
         debugPrint('FCM trigger failed for transfer $transferId: $e');
       }
+    }
+  }
+
+  /// Verifies that closed-app incoming delivery is actually possible before send.
+  /// This prevents silent "sent but no notification" failures when push infra
+  /// has not been set up yet.
+  static Future<PushReadinessResult> verifyClosedAppDeliveryReadiness({
+    required String receiverId,
+  }) async {
+    try {
+      await SupabaseConfig.ensureValidSession();
+
+      final receiver = await SupabaseConfig.client
+          .from('users')
+          .select('fcm_token')
+          .eq('id', receiverId)
+          .maybeSingle();
+      final receiverToken = (receiver?['fcm_token'] as String?)?.trim();
+      if (receiverToken == null || receiverToken.isEmpty) {
+        return const PushReadinessResult(
+          ready: false,
+          reason: 'Recipient has not registered for push notifications yet. '
+              'Ask them to open ZenSend once with internet and allow notifications.',
+        );
+      }
+
+      final dryRun = await SupabaseConfig.client.functions.invoke(
+        'send-transfer-fcm',
+        body: {
+          'dry_run': true,
+          'record': {'receiver_id': receiverId},
+        },
+      );
+
+      final rawData = dryRun.data;
+      if (rawData is Map<String, dynamic>) {
+        final ready = rawData['ready'] == true;
+        if (!ready) {
+          final reason = (rawData['reason'] as String?)?.trim();
+          return PushReadinessResult(
+            ready: false,
+            reason: reason?.isNotEmpty == true
+                ? reason
+                : 'Push delivery service is not ready.',
+          );
+        }
+        return const PushReadinessResult(ready: true);
+      }
+
+      return const PushReadinessResult(
+        ready: false,
+        reason: 'Push delivery health check returned an unexpected response.',
+      );
+    } on FunctionException catch (e) {
+      final details = (e.details ?? '').toString();
+      final isOldFunctionContract = e.status == 400 &&
+          details.toLowerCase().contains('missing transfer record');
+      if (isOldFunctionContract) {
+        return const PushReadinessResult(
+          ready: false,
+          reason: 'Push delivery function is outdated. Redeploy '
+              '`send-transfer-fcm` with dry-run support, then tap Refresh.',
+        );
+      }
+      return PushReadinessResult(
+        ready: false,
+        reason: 'Push delivery check failed: '
+            '${e.toString().replaceAll('Exception: ', '')}',
+      );
+    } catch (e) {
+      return PushReadinessResult(
+        ready: false,
+        reason: 'Push delivery check failed: '
+            '${e.toString().replaceAll('Exception: ', '')}',
+      );
     }
   }
 

@@ -48,7 +48,8 @@ Deno.serve(async (req) => {
   }
 
   const record = body.record as Record<string, string> | undefined;
-  if (!record?.id || !record?.receiver_id) {
+  const dryRun = body.dry_run === true;
+  if ((!dryRun && !record?.id) || !record?.receiver_id) {
     return new Response(JSON.stringify({ error: "Missing transfer record" }), {
       status: 400,
       headers: { ...cors, "Content-Type": "application/json" },
@@ -75,10 +76,38 @@ Deno.serve(async (req) => {
 
   const token = receiver?.fcm_token as string | undefined;
   if (!token) {
-    return new Response(JSON.stringify({ ok: true, skipped: "no_fcm_token" }), {
-      status: 200,
-      headers: { ...cors, "Content-Type": "application/json" },
-    });
+    if (dryRun) {
+      return new Response(
+        JSON.stringify({
+          ready: false,
+          reason:
+            "Recipient has no FCM token yet (app not opened / notifications not granted).",
+        }),
+        {
+          status: 200,
+          headers: { ...cors, "Content-Type": "application/json" },
+        },
+      );
+    }
+    return new Response(
+      JSON.stringify({ ok: true, skipped: "no_fcm_token" }),
+      {
+        status: 200,
+        headers: { ...cors, "Content-Type": "application/json" },
+      },
+    );
+  }
+
+  if (dryRun) {
+    return new Response(
+      JSON.stringify({
+        ready: true,
+      }),
+      {
+        status: 200,
+        headers: { ...cors, "Content-Type": "application/json" },
+      },
+    );
   }
 
   let senderCode = "";
