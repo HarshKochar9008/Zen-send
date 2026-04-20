@@ -12,6 +12,7 @@ dependencies:
 
   # Backend
   supabase_flutter: ^2.3.4
+  http: ^1.2.0
 
   # File picking & handling
   file_picker: ^11.0.2

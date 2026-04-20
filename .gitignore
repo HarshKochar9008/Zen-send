@@ -54,6 +54,9 @@ app.*.map.json
 skills/
 skills-lock.json
 
+#scripts
+scripts/
+
 # Flutter plugin registry
 .flutter-plugins
 

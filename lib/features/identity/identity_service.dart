@@ -2,6 +2,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/constants.dart';
+import '../../core/network/network_errors.dart';
 import '../../core/supabase_config.dart';
 import '../../core/utils/short_code_generator.dart';
 
@@ -20,7 +21,20 @@ class IdentityService {
     if (_cached != null) return _cached!;
 
     final prefs = await SharedPreferences.getInstance();
-    final session = await _ensureSession();
+    final cachedIdentity = _identityFromPrefs(prefs);
+    if (cachedIdentity != null) {
+      _cached = cachedIdentity;
+    }
+
+    Session session;
+    try {
+      session = await _ensureSession();
+    } catch (e) {
+      if (cachedIdentity != null && NetworkErrors.isRetryableFailure(e)) {
+        return cachedIdentity;
+      }
+      rethrow;
+    }
     final authUid = session.user.id;
     final savedAuthUid = prefs.getString(AppConstants.prefAuthUid);
 
@@ -90,12 +104,33 @@ class IdentityService {
   }
 
   static Future<Map<String, dynamic>?> findUserByCode(String code) async {
-    await SupabaseConfig.ensureValidSession();
-    return await SupabaseConfig.client
-        .from('users')
-        .select('id, short_code')
-        .eq('short_code', AppConstants.normalizeShortCode(code))
-        .maybeSingle();
+    const maxAttempts = 4;
+    final normalized = AppConstants.normalizeShortCode(code);
+
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0) {
+        await Future<void>.delayed(
+          Duration(milliseconds: 400 * (1 << (attempt - 1))),
+        );
+      }
+      try {
+        try {
+          await SupabaseConfig.ensureValidSession();
+        } catch (e) {
+          if (!NetworkErrors.isRetryableFailure(e)) rethrow;
+        }
+        return await SupabaseConfig.client
+            .from('users')
+            .select('id, short_code')
+            .eq('short_code', normalized)
+            .maybeSingle()
+            .timeout(const Duration(seconds: 22));
+      } catch (e) {
+        final last = attempt == maxAttempts - 1;
+        if (!NetworkErrors.isRetryableFailure(e) || last) rethrow;
+      }
+    }
+    throw StateError('findUserByCode: unreachable');
   }
 
   static void clearCache() => _cached = null;
@@ -103,9 +138,18 @@ class IdentityService {
   static Future<Session> _ensureSession() async {
     final current = SupabaseConfig.client.auth.currentSession;
     if (current != null) {
-      await SupabaseConfig.ensureValidSession();
+      try {
+        await SupabaseConfig.ensureValidSession();
+      } catch (e) {
+        // If refresh fails due transient network issues, keep current cached
+        // session so startup can continue and UI can recover gracefully.
+        if (!NetworkErrors.isRetryableFailure(e)) rethrow;
+        return current;
+      }
+
       final refreshed = SupabaseConfig.client.auth.currentSession;
       if (refreshed != null) return refreshed;
+      return current;
     }
 
     final authResponse = await SupabaseConfig.client.auth.signInAnonymously();
@@ -157,6 +201,15 @@ class IdentityService {
     await prefs.remove(AppConstants.prefShortCode);
     await prefs.remove(AppConstants.prefUserDbId);
     await prefs.remove(AppConstants.prefAuthUid);
+  }
+
+  static UserIdentity? _identityFromPrefs(SharedPreferences prefs) {
+    final id = prefs.getString(AppConstants.prefUserDbId);
+    final shortCode = prefs.getString(AppConstants.prefShortCode);
+    if (id == null || id.isEmpty || shortCode == null || shortCode.isEmpty) {
+      return null;
+    }
+    return UserIdentity(id: id, shortCode: shortCode);
   }
 }
 

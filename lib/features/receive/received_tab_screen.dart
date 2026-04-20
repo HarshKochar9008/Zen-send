@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide UserIdentity;
 
+import '../../core/network/connection_status.dart';
 import '../../core/theme.dart';
 import '../identity/identity_service.dart';
 import '../transfer/transfer_service.dart';
@@ -24,11 +25,20 @@ class _ReceivedTabScreenState extends State<ReceivedTabScreen>
   RealtimeChannel? _channel;
   Timer? _realtimeHealthTimer;
   DateTime _lastRealtimeSignalAt = DateTime.now().toUtc();
+  late final VoidCallback _onConnectionChanged;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    ConnectionStatus.instance.ensureStarted();
+    _onConnectionChanged = () {
+      if (!ConnectionStatus.instance.online.value) return;
+      if (_error != null && mounted) {
+        _loadTransfers();
+      }
+    };
+    ConnectionStatus.instance.online.addListener(_onConnectionChanged);
     _loadTransfers();
     _subscribeToRealtime();
     _startRealtimeHealthChecks();
@@ -36,6 +46,7 @@ class _ReceivedTabScreenState extends State<ReceivedTabScreen>
 
   @override
   void dispose() {
+    ConnectionStatus.instance.online.removeListener(_onConnectionChanged);
     WidgetsBinding.instance.removeObserver(this);
     _realtimeHealthTimer?.cancel();
     if (_channel != null) TransferService.unsubscribe(_channel!);
@@ -45,6 +56,7 @@ class _ReceivedTabScreenState extends State<ReceivedTabScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      unawaited(ConnectionStatus.instance.refresh());
       _loadTransfers();
       _ensureRealtimeHealthy(forceResubscribe: true);
     }
@@ -54,17 +66,30 @@ class _ReceivedTabScreenState extends State<ReceivedTabScreen>
     _lastRealtimeSignalAt = DateTime.now().toUtc();
     _channel = TransferService.subscribeToIncoming(
       userId: widget.identity.id,
-      onNewTransfer: (record) {
+      onTransferChange: (record, event) {
         _lastRealtimeSignalAt = DateTime.now().toUtc();
         _loadTransfers();
-        if (mounted) {
-          final status = record['status'] as String? ?? 'pending';
-          final msg = status == 'completed'
-              ? 'New files ready to download!'
-              : 'Incoming transfer…';
+        if (!mounted) return;
+        if (event == PostgresChangeEvent.insert) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Incoming transfer…'),
+              behavior: SnackBarBehavior.floating,
+              backgroundColor: AppColors.snackBarBg,
+              duration: Duration(seconds: 3),
+            ),
+          );
+          return;
+        }
+        final status = record['status'] as String? ?? 'pending';
+        if (status == 'completed' || status == 'partial') {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(msg),
+              content: Text(
+                status == 'completed'
+                    ? 'New files ready to download!'
+                    : 'Some files are ready to download.',
+              ),
               behavior: SnackBarBehavior.floating,
               backgroundColor: AppColors.snackBarBg,
               duration: const Duration(seconds: 3),

@@ -1,10 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:disk_space_plus/disk_space_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/constants.dart';
+import '../../core/network/connection_status.dart';
+import '../../core/supabase_config.dart';
 import '../../core/theme.dart';
+import '../transfer/transfer_progress_widgets.dart';
 import '../transfer/transfer_service.dart';
 import 'save_file.dart';
 
@@ -30,31 +36,93 @@ class _ReceiveScreenState extends State<ReceiveScreen>
   List<Map<String, dynamic>>? _files;
   bool _loading = true;
   String? _loadError;
+  String? _transferStatus;
+  List<FileUploadProgress>? _senderLiveStates;
+  RealtimeChannel? _detailChannel;
   final Map<String, _FileDownloadState> _dlStates = {};
   final Map<String, TransferCancellationToken> _downloadTokens = {};
   Set<String> _persistedDownloads = {};
   bool _powerSaveMode = false;
   int? _batteryLevel;
+  late final VoidCallback _onConnectionChanged;
+
+  bool get _transferTerminal {
+    final s = _transferStatus;
+    return s == 'completed' ||
+        s == 'partial' ||
+        s == 'failed' ||
+        s == 'expired';
+  }
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    ConnectionStatus.instance.ensureStarted();
+    _onConnectionChanged = () {
+      if (!ConnectionStatus.instance.online.value) return;
+      if (_loadError != null && mounted) {
+        _loadFiles();
+      }
+    };
+    ConnectionStatus.instance.online.addListener(_onConnectionChanged);
     _refreshPowerSaveMode();
     _loadPersistedState();
     _loadFiles();
+    _loadTransferMetaAndSubscribe();
   }
 
   @override
   void dispose() {
+    ConnectionStatus.instance.online.removeListener(_onConnectionChanged);
     WidgetsBinding.instance.removeObserver(this);
+    final ch = _detailChannel;
+    _detailChannel = null;
+    if (ch != null) {
+      TransferService.unsubscribe(ch);
+    }
     super.dispose();
+  }
+
+  void _applyTransferSnapshot(Map<String, dynamic> row) {
+    final parsed =
+        TransferService.parseUploadProgressPayload(row['upload_progress']);
+    setState(() {
+      _transferStatus = (row['status'] ?? 'pending').toString();
+      _senderLiveStates = parsed;
+    });
+  }
+
+  Future<void> _loadTransferMetaAndSubscribe() async {
+    final uid = SupabaseConfig.client.auth.currentUser?.id;
+    if (uid == null || !mounted) return;
+    final row = await TransferService.getTransferForReceiver(
+      transferId: widget.transferId,
+      receiverId: uid,
+    );
+    if (!mounted) return;
+    if (row != null) {
+      _applyTransferSnapshot(row);
+    }
+    _detailChannel = TransferService.subscribeToTransferDetail(
+      transferId: widget.transferId,
+      receiverId: uid,
+      onTransferRow: (r) {
+        if (!mounted) return;
+        _applyTransferSnapshot(r);
+      },
+      onTransferFileInserted: (_) {
+        if (!mounted) return;
+        _loadFiles();
+      },
+    );
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _refreshPowerSaveMode();
+      unawaited(ConnectionStatus.instance.refresh());
     }
   }
 
@@ -273,6 +341,19 @@ class _ReceiveScreenState extends State<ReceiveScreen>
     final fileName = file['file_name'] as String;
     final expectedHash = file['sha256_hash'] as String?;
 
+    if (!await ConnectionStatus.instance.refresh()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No internet connection. Connect to download.'),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: AppColors.snackBarBg,
+          ),
+        );
+      }
+      return;
+    }
+
     if (_persistedDownloads.contains(fileId)) return;
     final existingState = _dlStates[fileId];
     if (existingState?.status == _DownloadStatus.completed) return;
@@ -414,6 +495,84 @@ class _ReceiveScreenState extends State<ReceiveScreen>
     _downloadTokens[fileId]?.cancel();
   }
 
+  Widget _buildReceiveBody() {
+    final files = _files ?? const <Map<String, dynamic>>[];
+    final hasFiles = files.isNotEmpty;
+    final live = _senderLiveStates;
+    final showLive =
+        !_transferTerminal && live != null && live.isNotEmpty;
+
+    if (!hasFiles && !showLive) {
+      final waiting = !_transferTerminal;
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Text(
+            waiting
+                ? 'Waiting for the sender…\nLive upload progress will appear here.'
+                : 'No files in this transfer',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: AppColors.onSurfaceVariant.withValues(alpha: 0.55),
+              fontSize: 14,
+              height: 1.45,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+      children: [
+        if (showLive) ...[
+          Text(
+            'Sender upload',
+            style: TextStyle(
+              color: AppColors.onSurfaceVariant.withValues(alpha: 0.75),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.2,
+            ),
+          ),
+          const SizedBox(height: 10),
+          TransferUploadProgressList(
+            states: live,
+            headerPrefix: 'Live from sender',
+          ),
+          if (hasFiles) const SizedBox(height: 28),
+        ],
+        if (hasFiles) ...[
+          if (showLive)
+            Text(
+              'Ready to download',
+              style: TextStyle(
+                color: AppColors.onSurfaceVariant.withValues(alpha: 0.75),
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.2,
+              ),
+            ),
+          if (showLive) const SizedBox(height: 10),
+          ...files.map((file) {
+            final fileId = file['id'] as String;
+            final dlState = _dlStates[fileId];
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: _FileDownloadTile(
+                fileName: file['file_name'] as String,
+                fileSize: _formatSize(file['file_size']),
+                state: dlState,
+                onDownload: () => _downloadFile(file),
+                onCancel: () => _cancelDownload(fileId),
+              ),
+            );
+          }),
+        ],
+      ],
+    );
+  }
+
   Future<void> _downloadAll() async {
     if (_files == null || _files!.isEmpty) return;
     final aggregateOk = await _hasAggregateStorageForPendingDownloads();
@@ -531,36 +690,7 @@ class _ReceiveScreenState extends State<ReceiveScreen>
                             ),
                           ),
                         )
-                      : _files == null || _files!.isEmpty
-                          ? Center(
-                              child: Text(
-                                'No files in this transfer',
-                                style: TextStyle(
-                                  color: AppColors.onSurfaceVariant
-                                      .withValues(alpha: 0.5),
-                                  fontSize: 14,
-                                ),
-                              ),
-                            )
-                          : ListView.separated(
-                              padding: const EdgeInsets.all(20),
-                              itemCount: _files!.length,
-                              separatorBuilder: (_, __) =>
-                                  const SizedBox(height: 8),
-                              itemBuilder: (context, index) {
-                                final file = _files![index];
-                                final fileId = file['id'] as String;
-                                final dlState = _dlStates[fileId];
-
-                                return _FileDownloadTile(
-                                  fileName: file['file_name'] as String,
-                                  fileSize: _formatSize(file['file_size']),
-                                  state: dlState,
-                                  onDownload: () => _downloadFile(file),
-                                  onCancel: () => _cancelDownload(fileId),
-                                );
-                              },
-                            ),
+                      : _buildReceiveBody(),
             ),
           ],
         ),

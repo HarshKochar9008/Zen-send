@@ -14,6 +14,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:tus_client_dart/tus_client_dart.dart';
 
 import '../../core/constants.dart';
+import '../../core/network/network_errors.dart';
+import '../../core/offline/pending_backend_jobs.dart';
 import '../../core/supabase_config.dart';
 
 // ── Models ───────────────────────────────────────────────────────────────────
@@ -242,9 +244,109 @@ class _DigestSink implements Sink<Digest> {
 
 // ── Service ──────────────────────────────────────────────────────────────────
 
+/// Throttled writer for `transfers.upload_progress` so receivers see live upload state
+/// without flooding PostgREST on every TUS chunk callback.
+class _TransferProgressBroadcaster {
+  _TransferProgressBroadcaster(this._client, this._transferId);
+
+  final SupabaseClient _client;
+  final String _transferId;
+  String? _lastSig;
+  DateTime? _lastAt;
+
+  void notify(List<FileUploadProgress> states) {
+    final sig = states
+        .map((e) => '${e.status.name}:${(e.progress * 100).round()}')
+        .join('|');
+    final now = DateTime.now();
+    final elapsed =
+        _lastAt == null ? const Duration(days: 1) : now.difference(_lastAt!);
+    if (sig == _lastSig && elapsed < const Duration(milliseconds: 280)) {
+      return;
+    }
+    _lastSig = sig;
+    _lastAt = now;
+    unawaited(_write(states));
+  }
+
+  Future<void> flushFinal(List<FileUploadProgress> states) async {
+    await _write(states);
+  }
+
+  Future<void> _write(List<FileUploadProgress> states) async {
+    try {
+      await _client.from('transfers').update({
+        'upload_progress': TransferService.uploadProgressPayload(states),
+      }).eq('id', _transferId);
+    } catch (_) {
+      // Column may be missing on older DBs; transfer still succeeds locally.
+    }
+  }
+}
+
 class TransferService {
   static const _maxRetries = 3;
   static const _pendingUploadKey = 'pending_upload_job_v1';
+
+  /// JSON snapshot written to [transfers.upload_progress] for receiver realtime UI.
+  static List<Map<String, dynamic>> uploadProgressPayload(
+    List<FileUploadProgress> states,
+  ) {
+    return states
+        .map(
+          (s) => <String, dynamic>{
+            'file_name': s.fileName,
+            'file_size': s.fileSize,
+            'status': s.status.name,
+            'progress': s.progress,
+            if (s.sha256 != null) 'sha256': s.sha256,
+            if (s.error != null) 'error': s.error,
+            'attempt': s.attempt,
+          },
+        )
+        .toList();
+  }
+
+  /// Parses DB `upload_progress` JSON into [FileUploadProgress] list.
+  static List<FileUploadProgress>? parseUploadProgressPayload(dynamic raw) {
+    if (raw == null) return null;
+    if (raw is! List) return null;
+    final out = <FileUploadProgress>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final m = Map<String, dynamic>.from(item);
+      final name = (m['file_name'] ?? '').toString();
+      if (name.isEmpty) continue;
+      final sizeRaw = m['file_size'];
+      final size = sizeRaw is int ? sizeRaw : int.tryParse('$sizeRaw') ?? 0;
+      FileUploadStatus status;
+      try {
+        status = FileUploadStatus.values.byName((m['status'] ?? 'pending').toString());
+      } catch (_) {
+        status = FileUploadStatus.pending;
+      }
+      final progress = (m['progress'] is num)
+          ? (m['progress'] as num).toDouble()
+          : double.tryParse('${m['progress']}') ?? 0.0;
+      final sha = m['sha256']?.toString();
+      final err = m['error']?.toString();
+      final attemptRaw = m['attempt'];
+      final attempt =
+          attemptRaw is int ? attemptRaw : int.tryParse('$attemptRaw') ?? 0;
+      out.add(
+        FileUploadProgress(
+          fileName: name,
+          fileSize: size,
+          status: status,
+          progress: progress.clamp(0.0, 1.0),
+          sha256: sha,
+          error: err,
+          attempt: attempt,
+        ),
+      );
+    }
+    return out.isEmpty ? null : out;
+  }
 
   /// Compute SHA-256 of a file using streaming reads (constant memory).
   static Future<String> computeSha256(
@@ -498,6 +600,12 @@ class TransferService {
         .single();
 
     final transferId = transfer['id'] as String;
+    final progressBroadcaster = _TransferProgressBroadcaster(client, transferId);
+    void report(List<FileUploadProgress> s) {
+      onProgress(s);
+      progressBroadcaster.notify(s);
+    }
+
     var completedCount = 0;
 
     try {
@@ -517,7 +625,7 @@ class TransferService {
               error: 'File not accessible on disk',
             ),
           );
-          onProgress(states);
+          report(states);
           continue;
         }
 
@@ -533,7 +641,7 @@ class TransferService {
           i,
           states[i].copyWith(status: FileUploadStatus.hashing, progress: 0),
         );
-        onProgress(states);
+        report(states);
 
         String hash;
         try {
@@ -547,7 +655,7 @@ class TransferService {
                   i,
                   states[i].copyWith(progress: p / t),
                 );
-                onProgress(states);
+                report(states);
               }
             },
           );
@@ -562,7 +670,7 @@ class TransferService {
                   'Hash computation failed: ${e.toString().replaceAll('Exception: ', '')}',
             ),
           );
-          onProgress(states);
+          report(states);
           continue;
         }
 
@@ -576,7 +684,7 @@ class TransferService {
             progress: 0,
           ),
         );
-        onProgress(states);
+        report(states);
 
         var uploaded = false;
         String? lastError;
@@ -588,7 +696,7 @@ class TransferService {
               i,
               states[i].copyWith(attempt: attempt, progress: 0),
             );
-            onProgress(states);
+            report(states);
 
             await _uploadStorageFile(
               storagePath: storagePath,
@@ -602,7 +710,7 @@ class TransferService {
                     i,
                     states[i].copyWith(progress: sent / total),
                   );
-                  onProgress(states);
+                  report(states);
                 }
               },
             );
@@ -647,13 +755,14 @@ class TransferService {
             ),
           );
         }
-        onProgress(states);
+        report(states);
       }
 
       final allDone =
           states.every((s) => s.status == FileUploadStatus.completed);
       final anyDone = states.any((s) => s.status == FileUploadStatus.completed);
 
+      await progressBroadcaster.flushFinal(states);
       await _safeUpdateTransferStatus(
         client,
         transferId,
@@ -678,6 +787,9 @@ class TransferService {
         fileStates: states,
       );
     } catch (e) {
+      try {
+        await progressBroadcaster.flushFinal(states);
+      } catch (_) {}
       await _safeUpdateTransferStatus(client, transferId, 'failed');
       rethrow;
     } finally {
@@ -785,24 +897,70 @@ class TransferService {
     }
   }
 
+  static Future<void> _invokeSendTransferFcmEdge({
+    required String transferId,
+    required String senderId,
+    required String receiverId,
+  }) async {
+    await SupabaseConfig.client.functions.invoke(
+      'send-transfer-fcm',
+      body: {
+        'record': {
+          'id': transferId,
+          'sender_id': senderId,
+          'receiver_id': receiverId,
+        },
+      },
+    );
+  }
+
+  /// Retries edge invokes that failed with a retryable network error after upload.
+  static Future<void> flushPendingTransferPushNotifications() async {
+    final jobs = await PendingBackendJobs.loadTransferPushQueue();
+    if (jobs.isEmpty) return;
+
+    final remaining = <Map<String, String>>[];
+    for (final job in jobs) {
+      final transferId = job['transfer_id']!;
+      final senderId = job['sender_id']!;
+      final receiverId = job['receiver_id']!;
+      try {
+        await _invokeSendTransferFcmEdge(
+          transferId: transferId,
+          senderId: senderId,
+          receiverId: receiverId,
+        );
+      } catch (e) {
+        if (NetworkErrors.isRetryableFailure(e)) {
+          remaining.add(job);
+        }
+        if (kDebugMode) {
+          debugPrint('Pending FCM invoke for $transferId: $e');
+        }
+      }
+    }
+    await PendingBackendJobs.saveTransferPushQueue(remaining);
+  }
+
   static Future<void> _triggerIncomingTransferPush({
     required String transferId,
     required String senderId,
     required String receiverId,
   }) async {
     try {
-      await SupabaseConfig.client.functions.invoke(
-        'send-transfer-fcm',
-        body: {
-          'record': {
-            'id': transferId,
-            'sender_id': senderId,
-            'receiver_id': receiverId,
-          },
-        },
+      await _invokeSendTransferFcmEdge(
+        transferId: transferId,
+        senderId: senderId,
+        receiverId: receiverId,
       );
     } catch (e) {
-      // Push notification should never fail the transfer itself.
+      if (NetworkErrors.isRetryableFailure(e)) {
+        await PendingBackendJobs.enqueueTransferPushNotification(
+          transferId: transferId,
+          senderId: senderId,
+          receiverId: receiverId,
+        );
+      }
       if (kDebugMode) {
         debugPrint('FCM trigger failed for transfer $transferId: $e');
       }
@@ -958,6 +1116,21 @@ class TransferService {
     return List<Map<String, dynamic>>.from(result);
   }
 
+  /// Single transfer row for the authenticated receiver (RLS-enforced).
+  static Future<Map<String, dynamic>?> getTransferForReceiver({
+    required String transferId,
+    required String receiverId,
+  }) async {
+    await SupabaseConfig.ensureValidSession();
+    final row = await SupabaseConfig.client
+        .from('transfers')
+        .select()
+        .eq('id', transferId)
+        .eq('receiver_id', receiverId)
+        .maybeSingle();
+    return row == null ? null : Map<String, dynamic>.from(row);
+  }
+
   // ── Streaming download (constant memory, collision-safe) ───────────────
 
   static Future<File> downloadToFile({
@@ -1105,7 +1278,10 @@ class TransferService {
   /// to completed) so the receiver is notified when files are actually ready.
   static RealtimeChannel? subscribeToIncoming({
     required String userId,
-    required void Function(Map<String, dynamic> newRecord) onNewTransfer,
+    required void Function(
+      Map<String, dynamic> newRecord,
+      PostgresChangeEvent event,
+    ) onTransferChange,
   }) {
     try {
       final channel = SupabaseConfig.client.channel('incoming-$userId');
@@ -1121,7 +1297,10 @@ class TransferService {
           value: userId,
         ),
         callback: (PostgresChangePayload payload) {
-          onNewTransfer(payload.newRecord);
+          onTransferChange(
+            Map<String, dynamic>.from(payload.newRecord),
+            PostgresChangeEvent.insert,
+          );
         },
       );
 
@@ -1137,7 +1316,61 @@ class TransferService {
           value: userId,
         ),
         callback: (PostgresChangePayload payload) {
-          onNewTransfer(payload.newRecord);
+          onTransferChange(
+            Map<String, dynamic>.from(payload.newRecord),
+            PostgresChangeEvent.update,
+          );
+        },
+      );
+
+      channel.subscribe();
+      return channel;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Live updates for one transfer: sender upload snapshots on `transfers` and
+  /// new rows on `transfer_files` as each file is committed.
+  static RealtimeChannel? subscribeToTransferDetail({
+    required String transferId,
+    required String receiverId,
+    required void Function(Map<String, dynamic> transferRow) onTransferRow,
+    required void Function(Map<String, dynamic> fileRow) onTransferFileInserted,
+  }) {
+    try {
+      final channel = SupabaseConfig.client.channel('xfer-detail-$transferId');
+
+      channel.onPostgresChanges(
+        event: PostgresChangeEvent.update,
+        schema: 'public',
+        table: 'transfers',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'id',
+          value: transferId,
+        ),
+        callback: (PostgresChangePayload payload) {
+          final row = Map<String, dynamic>.from(payload.newRecord);
+          if ((row['receiver_id'] ?? '').toString() == receiverId) {
+            onTransferRow(row);
+          }
+        },
+      );
+
+      channel.onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'transfer_files',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'transfer_id',
+          value: transferId,
+        ),
+        callback: (PostgresChangePayload payload) {
+          onTransferFileInserted(
+            Map<String, dynamic>.from(payload.newRecord),
+          );
         },
       );
 

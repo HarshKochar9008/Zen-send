@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:http/io_client.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
 import 'constants.dart';
 
 Future<void> initSupabase() async {
@@ -27,9 +30,16 @@ Future<void> initSupabase() async {
     );
   }
 
+  final httpClient = IOClient(
+    HttpClient()
+      ..connectionTimeout = const Duration(seconds: 25)
+      ..userAgent = 'ZenSend/1.0 (Flutter)',
+  );
+
   await Supabase.initialize(
     url: url,
     anonKey: key,
+    httpClient: httpClient,
   );
 }
 
@@ -67,7 +77,9 @@ class SupabaseConfig {
 
     // Refresh if token expires within 60 seconds
     if (expiryDate.difference(now).inSeconds < 60) {
-      await client.auth.refreshSession();
+      await client.auth
+          .refreshSession()
+          .timeout(const Duration(seconds: 18));
     }
   }
 }

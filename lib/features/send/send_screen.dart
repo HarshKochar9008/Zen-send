@@ -5,10 +5,14 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:mime/mime.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show PostgrestException;
 
 import '../../core/constants.dart';
+import '../../core/network/connection_status.dart';
+import '../../core/network/network_errors.dart';
 import '../../core/theme.dart';
 import '../identity/identity_service.dart';
+import '../transfer/transfer_progress_widgets.dart';
 import '../transfer/transfer_service.dart';
 
 class SendScreen extends StatefulWidget {
@@ -136,15 +140,6 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
         _codeController.text = pending.receiverCode!;
       }
     });
-  }
-
-  Future<bool> _hasConnectivity() async {
-    try {
-      final result = await Connectivity().checkConnectivity();
-      return !result.contains(ConnectivityResult.none);
-    } catch (_) {
-      return true;
-    }
   }
 
   Future<bool> _isLikelyMeteredConnection() async {
@@ -404,7 +399,7 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
       return;
     }
 
-    if (!await _hasConnectivity()) {
+    if (!await ConnectionStatus.instance.refresh()) {
       setState(() => _codeError = 'No internet connection');
       return;
     }
@@ -431,10 +426,24 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
         _codeValidated = true;
         _validatedRecipientId = recipient['id'] as String;
       });
-    } catch (_) {
+    } on PostgrestException catch (e) {
       if (mounted) {
         setState(() {
-          _codeError = 'Could not validate code. Check your connection.';
+          _codeError = e.message.isNotEmpty
+              ? 'Server error while looking up code: ${e.message}'
+              : 'Server rejected this lookup. Check Supabase RLS allows '
+                  'anonymous users to read `users` for `short_code`.';
+          _validatingCode = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _codeError = NetworkErrors.isRetryableFailure(e)
+              ? 'Cannot reach Supabase to validate this code (network or '
+                  'firewall). Wi‑Fi/VPN/DNS can block *.supabase.co — try '
+                  'another network.'
+              : 'Could not validate code: $e';
           _validatingCode = false;
         });
       }
@@ -459,6 +468,14 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
     if (!powerApproved || !mounted) return;
     final confirmed = await _confirmMeteredUploadIfNeeded();
     if (!confirmed || !mounted) return;
+
+    if (!await ConnectionStatus.instance.refresh()) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'No internet connection. Try again when you are online.';
+      });
+      return;
+    }
 
     setState(() {
       _sending = true;
@@ -913,7 +930,7 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
 
                     // File list or upload progress
                     if (_sending && _uploadStates != null)
-                      _UploadProgressList(states: _uploadStates!)
+                      TransferUploadProgressList(states: _uploadStates!)
                     else if (_selectedFiles.isEmpty)
                       _EmptyFilesView(onPick: _pickFiles)
                     else
@@ -1057,193 +1074,6 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
         ),
       ],
     );
-  }
-}
-
-class _UploadProgressList extends StatelessWidget {
-  final List<FileUploadProgress> states;
-  const _UploadProgressList({required this.states});
-
-  @override
-  Widget build(BuildContext context) {
-    final completed =
-        states.where((s) => s.status == FileUploadStatus.completed).length;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(bottom: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '$completed / ${states.length} uploaded',
-                style: TextStyle(
-                  color: AppColors.onSurfaceVariant.withValues(alpha: 0.5),
-                  fontSize: 12,
-                ),
-              ),
-              const SizedBox(height: 8),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(
-                  value: states.isNotEmpty ? completed / states.length : 0,
-                  minHeight: 4,
-                ),
-              ),
-            ],
-          ),
-        ),
-        ...states.map((s) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: _FileProgressTile(state: s),
-            )),
-      ],
-    );
-  }
-}
-
-class _FileProgressTile extends StatelessWidget {
-  final FileUploadProgress state;
-  const _FileProgressTile({required this.state});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: AppColors.cardBg,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.cardBorder.withValues(alpha: 0.6)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              _statusIcon(),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  state.fileName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style:
-                      const TextStyle(fontSize: 13, color: AppColors.onSurface),
-                ),
-              ),
-              Text(
-                _statusLabel(),
-                style: TextStyle(
-                  color: _statusColor(),
-                  fontSize: 11,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-          if (state.status == FileUploadStatus.hashing ||
-              state.status == FileUploadStatus.uploading) ...[
-            const SizedBox(height: 10),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(3),
-              child: LinearProgressIndicator(
-                value: state.progress,
-                backgroundColor:
-                    AppColors.outlineVariant.withValues(alpha: 0.15),
-                valueColor: AlwaysStoppedAnimation(_statusColor()),
-                minHeight: 3,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              state.status == FileUploadStatus.hashing
-                  ? 'Verifying… ${(state.progress * 100).toInt()}%'
-                  : 'Uploading… ${(state.progress * 100).toInt()}%'
-                      '${state.attempt > 1 ? ' (retry ${state.attempt})' : ''}',
-              style: TextStyle(
-                color: AppColors.onSurfaceVariant.withValues(alpha: 0.4),
-                fontSize: 11,
-              ),
-            ),
-          ],
-          if (state.status == FileUploadStatus.completed &&
-              state.sha256 != null) ...[
-            const SizedBox(height: 4),
-            Text(
-              'SHA-256: ${state.sha256!.substring(0, 16)}…',
-              style: TextStyle(
-                color: AppColors.outlineVariant.withValues(alpha: 0.5),
-                fontSize: 10,
-                fontFamily: 'monospace',
-              ),
-            ),
-          ],
-          if (state.status == FileUploadStatus.failed &&
-              state.error != null) ...[
-            const SizedBox(height: 4),
-            Text(
-              state.error!,
-              style: const TextStyle(color: AppColors.error, fontSize: 11),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _statusIcon() {
-    switch (state.status) {
-      case FileUploadStatus.pending:
-        return Icon(Icons.schedule,
-            color: AppColors.outlineVariant.withValues(alpha: 0.5), size: 18);
-      case FileUploadStatus.hashing:
-        return const SizedBox(
-          width: 18,
-          height: 18,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        );
-      case FileUploadStatus.uploading:
-        return const Icon(Icons.cloud_upload_rounded,
-            color: AppColors.primary, size: 18);
-      case FileUploadStatus.completed:
-        return const Icon(Icons.check_circle_rounded,
-            color: AppColors.success, size: 18);
-      case FileUploadStatus.failed:
-        return const Icon(Icons.error_rounded,
-            color: AppColors.error, size: 18);
-    }
-  }
-
-  String _statusLabel() {
-    switch (state.status) {
-      case FileUploadStatus.pending:
-        return 'Queued';
-      case FileUploadStatus.hashing:
-        return 'Hashing';
-      case FileUploadStatus.uploading:
-        return 'Uploading';
-      case FileUploadStatus.completed:
-        return 'Sent';
-      case FileUploadStatus.failed:
-        return 'Failed';
-    }
-  }
-
-  Color _statusColor() {
-    switch (state.status) {
-      case FileUploadStatus.pending:
-        return AppColors.outlineVariant;
-      case FileUploadStatus.hashing:
-        return AppColors.primaryContainer;
-      case FileUploadStatus.uploading:
-        return AppColors.primary;
-      case FileUploadStatus.completed:
-        return AppColors.success;
-      case FileUploadStatus.failed:
-        return AppColors.error;
-    }
   }
 }
 

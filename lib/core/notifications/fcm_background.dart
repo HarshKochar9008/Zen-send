@@ -1,11 +1,11 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+import 'incoming_transfer_notification_style.dart';
 
 /// Runs in a separate isolate when a message arrives while the app is backgrounded or terminated.
 @pragma('vm:entry-point')
@@ -25,55 +25,37 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     ),
   );
 
-  const channel = AndroidNotificationChannel(
-    'incoming_transfers',
-    'Incoming Transfers',
-    description: 'Alerts when a new transfer arrives',
-    importance: Importance.max,
-  );
-
   final androidPlugin = plugin.resolvePlatformSpecificImplementation<
       AndroidFlutterLocalNotificationsPlugin>();
-  await androidPlugin?.createNotificationChannel(channel);
+  await androidPlugin?.createNotificationChannel(
+    IncomingTransferLocalNotifications.androidChannel,
+  );
 
-  // Android already shows system notifications for FCM "notification" payloads.
-  // Data-only messages need an explicit local notification here.
-  final sysTitle = message.notification?.title;
-  final isAndroid = !kIsWeb && Platform.isAndroid;
-  if (isAndroid && sysTitle != null && sysTitle.isNotEmpty) {
-    return;
-  }
-
-  final title = sysTitle ??
-      (message.data['title'] as String?)?.trim() ??
+  // Prefer one local notification per transfer (logo + stable id/tag). Server should send
+  // Android as data-only (see send-transfer-fcm) so we always hit this path on Android.
+  final data = Map<String, dynamic>.from(message.data);
+  final title = message.notification?.title ??
+      (data['title'] as String?)?.trim() ??
       'Incoming transfer';
   final body = message.notification?.body ??
-      (message.data['body'] as String?)?.trim() ??
+      (data['body'] as String?)?.trim() ??
       'Tap to view and download your files.';
 
-  final rawId = message.messageId ?? message.sentTime?.toIso8601String() ?? '';
-  final id = rawId.isEmpty ? message.hashCode : rawId.hashCode;
-  final notificationId = id.abs() % 2000000000;
+  final notificationId = IncomingTransferLocalNotifications.stableNotificationId(
+    data,
+    messageId: message.messageId,
+  );
+  final androidTag = IncomingTransferLocalNotifications.androidTagForTransfer(data);
 
   await plugin.show(
     id: notificationId,
     title: title,
     body: body,
-    notificationDetails: NotificationDetails(
-      android: AndroidNotificationDetails(
-        channel.id,
-        channel.name,
-        channelDescription: channel.description,
-        importance: Importance.max,
-        priority: Priority.high,
-        styleInformation: BigTextStyleInformation(body),
-      ),
-      iOS: const DarwinNotificationDetails(
-        presentAlert: true,
-        presentBadge: true,
-        presentSound: true,
-      ),
+    notificationDetails:
+        IncomingTransferLocalNotifications.notificationDetails(
+      body,
+      androidTag: androidTag,
     ),
-    payload: jsonEncode(message.data),
+    payload: jsonEncode(data),
   );
 }

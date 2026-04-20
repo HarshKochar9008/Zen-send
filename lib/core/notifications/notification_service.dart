@@ -7,7 +7,11 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../constants.dart';
+import '../network/network_errors.dart';
+import '../offline/pending_backend_jobs.dart';
 import '../supabase_config.dart';
+import 'incoming_transfer_notification_style.dart';
 import 'pending_push.dart';
 
 class NotificationService {
@@ -71,44 +75,37 @@ class NotificationService {
         },
       );
 
-      const channel = AndroidNotificationChannel(
-        'incoming_transfers',
-        'Incoming Transfers',
-        description: 'Alerts when a new transfer arrives',
-        importance: Importance.max,
-      );
       final androidPlugin = _localNotifications
           .resolvePlatformSpecificImplementation<
               AndroidFlutterLocalNotificationsPlugin>();
-      await androidPlugin?.createNotificationChannel(channel);
+      await androidPlugin?.createNotificationChannel(
+        IncomingTransferLocalNotifications.androidChannel,
+      );
 
       FirebaseMessaging.onMessage.listen((message) async {
+        final data = Map<String, dynamic>.from(message.data);
         final title = message.notification?.title ??
-            (message.data['title'] as String?) ??
+            (data['title'] as String?) ??
             'Incoming transfer';
         final body = message.notification?.body ??
-            (message.data['body'] as String?) ??
+            (data['body'] as String?) ??
             'A new transfer is available.';
+        final notificationId = IncomingTransferLocalNotifications.stableNotificationId(
+          data,
+          messageId: message.messageId,
+        );
+        final androidTag =
+            IncomingTransferLocalNotifications.androidTagForTransfer(data);
         await _localNotifications.show(
-          id: message.hashCode.abs() % 2000000000,
+          id: notificationId,
           title: title,
           body: body,
-          notificationDetails: NotificationDetails(
-            android: AndroidNotificationDetails(
-              channel.id,
-              channel.name,
-              channelDescription: channel.description,
-              importance: Importance.max,
-              priority: Priority.high,
-              styleInformation: BigTextStyleInformation(body),
-            ),
-            iOS: const DarwinNotificationDetails(
-              presentAlert: true,
-              presentBadge: true,
-              presentSound: true,
-            ),
+          notificationDetails:
+              IncomingTransferLocalNotifications.notificationDetails(
+            body,
+            androidTag: androidTag,
           ),
-          payload: jsonEncode(message.data),
+          payload: jsonEncode(data),
         );
       });
 
@@ -131,7 +128,11 @@ class NotificationService {
           await SupabaseConfig.client
               .from('users')
               .update({'fcm_token': token}).eq('id', uid);
+          await PendingBackendJobs.clearFcmTokenSyncPending();
         } catch (e) {
+          if (NetworkErrors.isRetryableFailure(e)) {
+            await PendingBackendJobs.markFcmTokenSyncPending(uid);
+          }
           if (kDebugMode) {
             debugPrint('FCM token refresh sync failed: $e');
           }
@@ -163,12 +164,30 @@ class NotificationService {
     try {
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null || token.isEmpty) return;
+      try {
+        await SupabaseConfig.ensureValidSession();
+      } catch (_) {
+        // Session refresh can fail offline; DB update may still work briefly or fail clearly below.
+      }
       await SupabaseConfig.client
           .from('users')
           .update({'fcm_token': token}).eq('id', userId);
+      await PendingBackendJobs.clearFcmTokenSyncPending();
     } catch (e) {
+      if (NetworkErrors.isRetryableFailure(e)) {
+        await PendingBackendJobs.markFcmTokenSyncPending(userId);
+      }
       if (kDebugMode) {
-        debugPrint('FCM token sync failed: $e');
+        if (NetworkErrors.isRetryableFailure(e)) {
+          final host = Uri.tryParse(AppConstants.supabaseUrl)?.host ?? 'Supabase';
+          debugPrint(
+            'FCM: device token from Firebase is fine; saving it to your backend failed '
+            'because $host could not be reached (JWT refresh / REST timed out). '
+            'Fix network, VPN, or firewall blocking HTTPS to Supabase. ($e)',
+          );
+        } else {
+          debugPrint('FCM token sync failed: $e');
+        }
       }
     }
   }

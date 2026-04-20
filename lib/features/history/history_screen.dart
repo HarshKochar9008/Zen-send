@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide UserIdentity;
 
 import '../../core/constants.dart';
+import '../../core/network/connection_status.dart';
 import '../../core/theme.dart';
 import '../identity/identity_service.dart';
 import '../transfer/transfer_service.dart';
@@ -24,16 +25,26 @@ class _HistoryScreenState extends State<HistoryScreen> {
   int _currentPage = 0;
   bool _hasMore = true;
   _HistoryFilter _filter = _HistoryFilter.all;
+  late final VoidCallback _onConnectionChanged;
 
   @override
   void initState() {
     super.initState();
+    ConnectionStatus.instance.ensureStarted();
+    _onConnectionChanged = () {
+      if (!ConnectionStatus.instance.online.value) return;
+      if (_error != null && mounted) {
+        _loadTransfers();
+      }
+    };
+    ConnectionStatus.instance.online.addListener(_onConnectionChanged);
     _loadTransfers();
     _subscribeToRealtime();
   }
 
   @override
   void dispose() {
+    ConnectionStatus.instance.online.removeListener(_onConnectionChanged);
     if (_channel != null) TransferService.unsubscribe(_channel!);
     super.dispose();
   }
@@ -41,9 +52,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
   void _subscribeToRealtime() {
     _channel = TransferService.subscribeToIncoming(
       userId: widget.identity.id,
-      onNewTransfer: (record) {
+      onTransferChange: (record, event) {
         _loadTransfers();
-        if (mounted) {
+        if (!mounted) return;
+        if (event == PostgresChangeEvent.insert) {
           final status = record['status'] as String? ?? 'pending';
           final msg = status == 'completed'
               ? 'Transfer ready — files available for download!'
@@ -51,6 +63,22 @@ class _HistoryScreenState extends State<HistoryScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(msg),
+              behavior: SnackBarBehavior.floating,
+              backgroundColor: AppColors.snackBarBg,
+              duration: const Duration(seconds: 3),
+            ),
+          );
+          return;
+        }
+        final status = record['status'] as String? ?? 'pending';
+        if (status == 'completed' || status == 'partial') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                status == 'completed'
+                    ? 'Transfer ready — files available for download!'
+                    : 'Some files from a transfer are ready to download.',
+              ),
               behavior: SnackBarBehavior.floating,
               backgroundColor: AppColors.snackBarBg,
               duration: const Duration(seconds: 3),

@@ -1,7 +1,9 @@
-import 'package:connectivity_plus/connectivity_plus.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/network/connection_status.dart';
 import '../../core/native/native_share.dart';
 import '../../core/theme.dart';
 import '../identity/identity_service.dart';
@@ -17,16 +19,26 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _isOnline = true;
+  late final VoidCallback _onConnectionChanged;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _checkConnectivity();
+    ConnectionStatus.instance.ensureStarted();
+    _isOnline = ConnectionStatus.instance.online.value;
+    _onConnectionChanged = () {
+      final next = ConnectionStatus.instance.online.value;
+      if (!mounted || next == _isOnline) return;
+      setState(() => _isOnline = next);
+    };
+    ConnectionStatus.instance.online.addListener(_onConnectionChanged);
+    unawaited(ConnectionStatus.instance.refresh());
   }
 
   @override
   void dispose() {
+    ConnectionStatus.instance.online.removeListener(_onConnectionChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -34,17 +46,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _checkConnectivity();
+      unawaited(ConnectionStatus.instance.refresh());
     }
-  }
-
-  Future<void> _checkConnectivity() async {
-    try {
-      final result = await Connectivity().checkConnectivity();
-      if (mounted) {
-        setState(() => _isOnline = !result.contains(ConnectivityResult.none));
-      }
-    } catch (_) {}
   }
 
   void _copyCode() {

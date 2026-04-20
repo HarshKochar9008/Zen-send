@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/app_reset.dart';
 import '../../core/theme.dart';
 import '../identity/identity_service.dart';
 import '../onboarding/onboarding_screen.dart';
@@ -140,10 +141,79 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const SizedBox(height: 16),
             ..._buildSettingsTiles(aboutItems),
+            const SizedBox(height: 24),
+            _buildDangerZone(context),
             const SizedBox(height: 32),
           ],
         ),
       ),
+    );
+  }
+
+  Future<void> _confirmFullLocalReset(BuildContext context) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reset all local data?'),
+        content: const SingleChildScrollView(
+          child: Text(
+            'This device will forget your short code, onboarding, theme, and '
+            'pending uploads, and sign out of Supabase here.\n\n'
+            'To wipe server rows but keep tables/columns/policies, run '
+            'scripts/reset_supabase_data.sql in the Supabase SQL editor, then '
+            'empty the Storage bucket "transfers" in the dashboard.\n\n'
+            'Network issues are not fixed by a reset — see '
+            'scripts/emulator_network_reset_hint.txt.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.error,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Reset this device'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    await AppReset.clearLocalDataAndRelaunchUi();
+  }
+
+  Widget _buildDangerZone(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'DANGER ZONE',
+          style: TextStyle(
+            color: AppColors.error,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.5,
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: () => _confirmFullLocalReset(context),
+            icon: const Icon(Icons.delete_forever_rounded, color: AppColors.error),
+            label: const Text('Clear all local data & sign out'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.error,
+              side: const BorderSide(color: AppColors.error),
+              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+            ),
+          ),
+        ),
+      ],
     );
   }
 

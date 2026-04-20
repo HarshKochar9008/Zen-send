@@ -26,6 +26,12 @@ lib/
 ├── core/
 │   ├── constants.dart                     # App-wide config (limits, keys, pagination)
 │   ├── supabase_config.dart               # Supabase singleton + auth state management
+│   ├── network/
+│   │   ├── connection_status.dart         # Shared connectivity notifier (connectivity_plus)
+│   │   └── network_errors.dart            # Retryable transport/DNS classification
+│   ├── offline/
+│   │   ├── offline_sync_coordinator.dart  # When-online drain: FCM DB sync, push invoke queue
+│   │   └── pending_backend_jobs.dart      # SharedPreferences queue for deferred backend calls
 │   └── utils/
 │       └── short_code_generator.dart      # Safe-alphabet code generation
 └── features/
@@ -72,6 +78,7 @@ lib/
 - **Multiple file transfer** — up to 20 files per transfer, validated before upload. Duplicate file detection.
 - **Cross-internet** — works on any network via Supabase cloud endpoints (not limited to same Wi-Fi).
 - **Connectivity awareness** — pre-flight network check before send operations, real-time online/offline indicator on home screen.
+- **Offline retry orchestration** — `ConnectionStatus` + `OfflineSyncCoordinator` retry persisted work when connectivity returns: FCM token sync to Supabase, queued `send-transfer-fcm` invokes after uploads, and nudges for an interrupted send (`PendingUploadJob`). See library docs on `lib/core/offline/offline_sync_coordinator.dart`.
 
 ### Transfer Engine
 
@@ -111,7 +118,9 @@ lib/
 | Download failure | Error state with retry button |
 | SHA-256 mismatch | `Integrity check failed — file may be corrupted` |
 | Permission denied | Descriptive message (e.g., `Gallery access denied. Please enable in Settings.`) |
-| Network error | Descriptive message, retry available |
+| Network error | Descriptive message, retry available; lists auto-refresh when back online if the last load failed |
+| FCM token not saved (offline) | Pending flag; retried when device is online (`OfflineSyncCoordinator`) |
+| Push edge function failed after upload | Job queued; retried when online (non-network errors dropped) |
 | Anonymous auth failure | `Ensure anonymous auth is enabled in Supabase` |
 | Short code collision | Transparent retry (up to 10 attempts) |
 | Code validation failure | `Could not validate code. Check your connection.` |
@@ -219,7 +228,7 @@ Supabase Dashboard → Database → Replication → Enable Realtime for the `tra
    - Firebase Console → Project settings → Your apps → Android — the app **package name must match** `applicationId` in `android/app/build.gradle.kts` (currently `com.Zen.app`). Download `google-services.json` → `android/app/google-services.json`.
    - iOS: add `ios/Runner/GoogleService-Info.plist` from the same console (enable Push Notifications + Background Modes → Remote notifications in Xcode).
 2. Ensure `users.fcm_token` exists (see schema above). The app registers `FirebaseMessaging.onBackgroundMessage` **before** `Firebase.initializeApp()`, requests Android 13+ notification permission, creates the `incoming_transfers` channel, shows **data-only** pushes in the background isolate, and merges **notification + data** payloads for deep-linking (`transfer_id`, `sender_code`).
-3. **Deploy the included Edge Function** `supabase/functions/send-transfer-fcm/` (FCM HTTP v1). Set secrets `FCM_PROJECT_ID` and `FCM_SERVICE_ACCOUNT_JSON` (Firebase service account JSON with *Firebase Cloud Messaging API Admin*). Create a **Database Webhook** on `transfers` **INSERT** → `POST` your function URL (see comments in `index.ts`).
+3. **Deploy the included Edge Function** `supabase/functions/send-transfer-fcm/` (FCM HTTP v1). Set secrets `FCM_PROJECT_ID` and `FCM_SERVICE_ACCOUNT_JSON` (Firebase service account JSON with *Firebase Cloud Messaging API Admin*). The **app invokes this after upload** — do **not** add a duplicate **Database Webhook** on `transfers` INSERT (that caused multiple notifications per transfer). See `index.ts` header comments.
 4. **FCM payload contract** (what the function already sends): `data.transfer_id`, `data.sender_code`, plus `notification.title/body` for system tray display on Android/iOS.
 
 #### 6. RLS Policies (Database Tables)
@@ -319,7 +328,7 @@ flutter test
 
 | Area | Limitation | Path to Fix |
 |------|-----------|-------------|
-| Push delivery | You must deploy `send-transfer-fcm`, set `FCM_*` secrets, and wire a Database Webhook; placeholder `google-services.json` will not talk to your Firebase project until replaced. | Follow §5b |
+| Push delivery | Deploy `send-transfer-fcm`, set `FCM_*` secrets; client calls the function after upload (no INSERT webhook). Placeholder `google-services.json` must be replaced for real FCM. | Follow §5b |
 | Background transfers | Transfers run in the foreground. App kill = failed transfer. | Add `flutter_background_service` or `workmanager` |
 | Supabase Storage limits | Free tier: 50MB/file, 1GB total. Pro plan: 5GB/file. | Upgrade Supabase plan or implement chunked/tus uploads |
 | Platform channels | Native share sheet implemented with `MethodChannel` (`zensend/native_share`) for Android and iOS. | Extend with native file picker (Pigeon) or MediaStore save channel |

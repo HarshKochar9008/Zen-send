@@ -9,10 +9,9 @@
  *   FCM_SERVICE_ACCOUNT_JSON Full JSON of a Firebase service account with
  *                            "Firebase Cloud Messaging API Admin" enabled
  *
- * Hook: Supabase Dashboard → Database → Webhooks → Create
- *   Table: transfers   Events: INSERT
- *   HTTP Request: POST https://<ref>.functions.supabase.co/send-transfer-fcm
- *   Headers: Authorization: Bearer <SERVICE_ROLE_KEY>
+ * Push trigger: the **Flutter client** calls this function after files are uploaded
+ * (`TransferService`). Do **not** also add a Database Webhook on `transfers` INSERT — that
+ * would send duplicate FCMs for the same transfer (multiple notifications).
  */
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { GoogleAuth } from "npm:google-auth-library@9.14.2";
@@ -133,30 +132,32 @@ Deno.serve(async (req) => {
     });
   }
 
+  // No top-level `notification` on Android: avoids a system tray entry that duplicates the
+  // Flutter local notification (logo + single slot per transfer_id). Title/body live in
+  // `data` for the app and in `apns` for iOS banner when backgrounded.
+  const title = "Incoming transfer";
+  const body = "Tap to open ZenSend and download your files.";
   const fcmBody = {
     message: {
       token,
-      notification: {
-        title: "Incoming transfer",
-        body: "Tap to open ZenSend and download your files.",
-      },
       data: {
         transfer_id: record.id,
         sender_code: senderCode,
-        title: "Incoming transfer",
-        body: "Tap to open ZenSend and download your files.",
+        title,
+        body,
       },
-      android: { priority: "HIGH" as const },
+      android: {
+        priority: "HIGH" as const,
+      },
       apns: {
         headers: { "apns-priority": "10" },
         payload: {
           aps: {
             alert: {
-              title: "Incoming transfer",
-              body: "Tap to open ZenSend and download your files.",
+              title,
+              body,
             },
             sound: "default",
-            "mutable-content": 1,
           },
         },
       },

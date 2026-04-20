@@ -18,6 +18,10 @@ class PendingIncomingTransfer {
     senderCode = _read(data, const ['sender_code', 'senderCode']) ?? '';
   }
 
+  /// FCM `data` payload transfer id (used to collapse duplicate pushes to one notification).
+  static String? readTransferId(Map<String, dynamic> data) =>
+      _read(data, const ['transfer_id', 'transferId']);
+
   static String? _read(Map<String, dynamic> data, List<String> keys) {
     for (final k in keys) {
       final v = data[k];

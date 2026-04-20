@@ -1,10 +1,17 @@
 import 'dart:io';
+import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'core/constants.dart';
 import 'core/navigation/root_navigator.dart';
+import 'core/network/connection_status.dart';
+import 'core/network/network_errors.dart';
 import 'core/notifications/notification_service.dart';
+import 'core/offline/offline_sync_coordinator.dart';
+import 'core/supabase_config.dart';
 import 'core/theme.dart';
 import 'features/home/home_screen.dart';
 import 'features/history/history_screen.dart';
@@ -83,6 +90,11 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   UserIdentity? _identity;
   bool _loading = true;
   String? _error;
+  Timer? _networkRetryTimer;
+  static const Duration _networkRetryDelay = Duration(seconds: 5);
+  bool _runningDiagnostics = false;
+  String? _diagnosticsReport;
+  VoidCallback? _connectivityListener;
 
   Future<UserIdentity> _initializeIdentityWithRetry() async {
     try {
@@ -95,16 +107,11 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
     }
   }
 
-  bool _isNetworkLookupFailure(Object error) {
-    if (error is SocketException) return true;
-    final message = error.toString().toLowerCase();
-    return message.contains('failed host lookup') ||
-        message.contains('socketexception');
-  }
+  bool _isNetworkLookupFailure(Object error) => NetworkErrors.isRetryableFailure(error);
 
   String _buildStartupErrorMessage(Object error) {
     if (_isNetworkLookupFailure(error)) {
-      return 'Could not reach Supabase. Check emulator internet/DNS, then tap Retry.';
+      return 'Could not reach Supabase. Check emulator internet/DNS. Retrying automatically...';
     }
     return kDebugMode
         ? 'Startup failed: $error'
@@ -115,27 +122,48 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    ConnectionStatus.instance.ensureStarted();
+    _connectivityListener = () {
+      if (!ConnectionStatus.instance.online.value) return;
+      if (_identity == null && _error != null && !_loading && mounted) {
+        _loadIdentity();
+      }
+    };
+    ConnectionStatus.instance.online.addListener(_connectivityListener!);
     NotificationService.handleLaunchAndPendingNavigation();
     _loadIdentity();
   }
 
   @override
   void dispose() {
+    OfflineSyncCoordinator.instance.stop();
+    if (_connectivityListener != null) {
+      ConnectionStatus.instance.online.removeListener(_connectivityListener!);
+    }
+    _networkRetryTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _identity != null) {
-      NotificationService.syncFcmToken(_identity!.id);
+    if (state == AppLifecycleState.resumed) {
+      unawaited(ConnectionStatus.instance.refresh());
+      if (_identity == null && _error != null && !_loading) {
+        _loadIdentity();
+      } else if (_identity != null) {
+        NotificationService.syncFcmToken(_identity!.id);
+        unawaited(OfflineSyncCoordinator.instance.onAppResumed());
+      }
     }
   }
 
   Future<void> _loadIdentity() async {
+    _networkRetryTimer?.cancel();
     setState(() {
       _loading = true;
       _error = null;
+      _diagnosticsReport = null;
     });
     try {
       final identity = await _initializeIdentityWithRetry();
@@ -143,6 +171,8 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
         NotificationService.setUserId(identity.id);
         await NotificationService.syncFcmToken(identity.id);
         NotificationService.handleLaunchAndPendingNavigation();
+        OfflineSyncCoordinator.instance.start(userId: identity.id);
+        unawaited(OfflineSyncCoordinator.instance.runPendingWork());
         setState(() {
           _identity = identity;
           _loading = false;
@@ -164,11 +194,75 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
       }
     } catch (e) {
       if (mounted) {
+        final networkFailure = _isNetworkLookupFailure(e);
         setState(() {
           _error = _buildStartupErrorMessage(e);
           _loading = false;
         });
+        if (networkFailure) {
+          _scheduleAutoRetry();
+        }
       }
+    }
+  }
+
+  void _scheduleAutoRetry() {
+    _networkRetryTimer?.cancel();
+    _networkRetryTimer = Timer(_networkRetryDelay, () {
+      if (!mounted || _loading) return;
+      _loadIdentity();
+    });
+  }
+
+  Future<void> _runDiagnostics() async {
+    if (_runningDiagnostics) return;
+    setState(() {
+      _runningDiagnostics = true;
+      _diagnosticsReport = 'Running diagnostics...';
+    });
+
+    final lines = <String>[];
+    try {
+      final connectivity = await Connectivity().checkConnectivity();
+      lines.add('Connectivity: ${connectivity.map((e) => e.name).join(", ")}');
+    } catch (e) {
+      lines.add('Connectivity check failed: $e');
+    }
+
+    final host = Uri.parse(AppConstants.supabaseUrl).host;
+    try {
+      final lookup = await InternetAddress.lookup(host);
+      lines.add(
+        'DNS lookup: OK (${lookup.map((e) => e.address).toSet().join(", ")})',
+      );
+    } catch (e) {
+      lines.add('DNS lookup: FAILED ($e)');
+    }
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client.getUrl(Uri.parse('${AppConstants.supabaseUrl}/auth/v1/health'));
+      request.headers.add('apikey', AppConstants.supabaseAnonKey);
+      final response = await request.close();
+      lines.add('Auth health endpoint: HTTP ${response.statusCode}');
+    } catch (e) {
+      lines.add('Auth health endpoint: FAILED ($e)');
+    } finally {
+      client.close(force: true);
+    }
+
+    try {
+      await SupabaseConfig.ensureValidSession();
+      lines.add('Session refresh check: OK');
+    } catch (e) {
+      lines.add('Session refresh check: FAILED ($e)');
+    }
+
+    if (mounted) {
+      setState(() {
+        _runningDiagnostics = false;
+        _diagnosticsReport = lines.join('\n');
+      });
     }
   }
 
@@ -225,6 +319,35 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
                 const SizedBox(height: 32),
                 FilledButton(
                     onPressed: _loadIdentity, child: const Text('Retry')),
+                const SizedBox(height: 12),
+                OutlinedButton(
+                  onPressed: _runningDiagnostics ? null : _runDiagnostics,
+                  child: Text(
+                    _runningDiagnostics ? 'Running diagnostics...' : 'Run diagnostics',
+                  ),
+                ),
+                if (_diagnosticsReport != null) ...[
+                  const SizedBox(height: 16),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: AppColors.cardBg.withValues(alpha: 0.5),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: AppColors.cardBorder.withValues(alpha: 0.5),
+                      ),
+                    ),
+                    child: Text(
+                      _diagnosticsReport!,
+                      style: const TextStyle(
+                        color: AppColors.onSurfaceVariant,
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
