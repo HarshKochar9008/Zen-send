@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import '../navigation/root_navigator.dart';
 import '../../features/receive/receive_screen.dart';
 
-/// Pending incoming transfer opened from a push while UI was not ready.
 class PendingIncomingTransfer {
   static String? transferId;
   static String? senderCode;
@@ -18,7 +17,6 @@ class PendingIncomingTransfer {
     senderCode = _read(data, const ['sender_code', 'senderCode']) ?? '';
   }
 
-  /// FCM `data` payload transfer id (used to collapse duplicate pushes to one notification).
   static String? readTransferId(Map<String, dynamic> data) =>
       _read(data, const ['transfer_id', 'transferId']);
 

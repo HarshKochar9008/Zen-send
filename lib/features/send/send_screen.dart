@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:battery_plus/battery_plus.dart';
@@ -43,7 +44,9 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _refreshPowerSaveMode();
-    _checkInterruptedUploadRecovery();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_checkInterruptedUploadRecovery());
+    });
   }
 
   @override
@@ -86,12 +89,49 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
         existing.add(file);
       }
     }
+    if (!mounted) return;
 
     if (existing.isEmpty) {
-      await TransferService.clearPendingUploadJob();
+      if (!mounted) return;
+      final discard = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppColors.cardBg,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text(
+            'Interrupted send',
+            style: TextStyle(color: AppColors.onSurface, fontSize: 16),
+          ),
+          content: Text(
+            'A previous send did not finish, but the saved files are no longer '
+            'on this device (common after a restart). Discard this reminder?',
+            style: TextStyle(
+              color: AppColors.onSurfaceVariant.withValues(alpha: 0.8),
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Keep'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Discard'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+      if (discard == true) {
+        await TransferService.discardPendingUploadJob(
+          senderId: widget.identity.id,
+        );
+      }
       return;
     }
-    if (!mounted) return;
 
     final shouldResume = await showDialog<bool>(
       context: context,
@@ -126,7 +166,7 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
 
     if (!mounted) return;
     if (shouldResume != true) {
-      await TransferService.clearPendingUploadJob();
+      await TransferService.discardPendingUploadJob(senderId: widget.identity.id);
       return;
     }
 
@@ -152,9 +192,13 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
   }
 
   Future<bool> _confirmMeteredUploadIfNeeded() async {
-    if (_totalSize < AppConstants.cellularWarnThresholdBytes) return true;
     final isMetered = await _isLikelyMeteredConnection();
     if (!mounted) return false;
+
+    final threshold = isMetered
+        ? AppConstants.cellularMeteredWarnThresholdBytes
+        : AppConstants.largeUploadWarnThresholdBytes;
+    if (_totalSize < threshold) return true;
 
     final confirmed = await showDialog<bool>(
       context: context,
@@ -202,7 +246,7 @@ class _SendScreenState extends State<SendScreen> with WidgetsBindingObserver {
   }
 
   Future<bool> _confirmPowerSaveUploadIfNeeded() async {
-    if (_totalSize < AppConstants.cellularWarnThresholdBytes) return true;
+    if (_totalSize < AppConstants.largeUploadWarnThresholdBytes) return true;
     final powerSave = await _isPowerSaveModeEnabled();
     if (!powerSave || !mounted) return true;
 

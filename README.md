@@ -1,10 +1,40 @@
 # ZenSend
 
-Real-time mobile file sharing app (Android/iOS only) built with Flutter and Supabase for the NeoSapien Flutter Developer Intern Assessment.
+ZenSend is a real-time, cross-internet mobile file sharing app (Android/iOS) built with Flutter + Supabase for the NeoSapien Flutter Developer Intern Assessment.
+
+It focuses on:
+- simple recipient-code based sharing (no account setup friction),
+- reliable large-file transfer using resumable uploads,
+- end-to-end transfer integrity checks with SHA-256,
+- and resilient behavior across poor or intermittent connectivity.
+
+## Overview
+
+### What the app does
+
+ZenSend lets a sender transfer one or more files to a receiver using a short recipient code.  
+Files are uploaded to Supabase Storage, transfer metadata is stored in Postgres, and the receiver is updated through Supabase Realtime and push notifications.
+
+### Key product behavior
+
+- No email/password onboarding (anonymous auth).
+- Sender and receiver can be on different networks (internet-based relay model).
+- Receiver can download later if offline during send.
+- Transfers are treated as time-bound (24-hour TTL).
 
 ## Architecture
 
-### Tech Stack
+### High-level system design
+
+ZenSend uses a **client-driven architecture** where Flutter handles user flows, transfer orchestration, and integrity checks, while Supabase provides identity, storage, metadata, and real-time signaling.
+
+Core building blocks:
+- **Identity layer**: Supabase Anonymous Auth + short code provisioning.
+- **Transfer layer**: streaming hash, resumable upload, metadata persistence, download + verify.
+- **Notification layer**: Realtime subscriptions + FCM notifications for closed-app delivery.
+- **Resilience layer**: connectivity monitoring, persisted retry queues, deferred backend jobs.
+
+### Tech stack
 
 | Layer | Technology |
 |-------|-----------|
@@ -17,7 +47,7 @@ Real-time mobile file sharing app (Android/iOS only) built with Flutter and Supa
 | Connectivity | `connectivity_plus` for network awareness |
 | Transport | TLS 1.2+ via Supabase HTTPS endpoints (all traffic encrypted) |
 
-### Project Structure
+### Codebase structure
 
 ```
 lib/
@@ -48,7 +78,7 @@ lib/
         └── transfer_service.dart          # Core: streaming I/O, SHA-256, retry, Realtime, pagination
 ```
 
-### Data Flow
+### Transfer data flow
 
 ```
 [Sender]                              [Supabase]                           [Receiver]
@@ -68,43 +98,49 @@ lib/
 
 ## Features
 
-### Core
+### 1) User and identity
 
-- **Anonymous onboarding** — no email, password, or phone number. Uses Supabase anonymous auth with local persistence via SharedPreferences. Session refresh handled automatically.
-- **Unique 6-char short codes** — generated from a safe alphabet (`ABCDEFGHJKMNPQRSTUVWXYZ23456789`) that intentionally excludes ambiguous characters (O/0, I/1/L).
-- **Atomic collision handling** — short codes are INSERT-ed directly; Postgres `UNIQUE` constraint violations (error 23505) trigger automatic retry with a new code (up to 10 attempts).
-- **Send via recipient code** — validates code against DB, fails fast with inline error if not found. Self-send blocked.
-- **All file types** — images, videos, audio, documents, arbitrary binaries (`FileType.any`).
-- **Multiple file transfer** — up to 20 files per transfer, validated before upload. Duplicate file detection.
-- **Cross-internet** — works on any network via Supabase cloud endpoints (not limited to same Wi-Fi).
-- **Connectivity awareness** — pre-flight network check before send operations, real-time online/offline indicator on home screen.
-- **Offline retry orchestration** — `ConnectionStatus` + `OfflineSyncCoordinator` retry persisted work when connectivity returns: FCM token sync to Supabase, queued `send-transfer-fcm` invokes after uploads, and nudges for an interrupted send (`PendingUploadJob`). See library docs on `lib/core/offline/offline_sync_coordinator.dart`.
+- **Anonymous onboarding**: no email/password/phone; device gets an anonymous Supabase auth identity.
+- **Safe short recipient code**: 6-character code from a disambiguated alphabet (`ABCDEFGHJKMNPQRSTUVWXYZ23456789`).
+- **Collision-safe code creation**: unique-constraint retries up to 10 attempts for code generation.
+- **Session continuity**: token refresh + session recovery logic prevent most auth interruptions.
 
-### Transfer Engine
+### 2) Sending and receiving files
 
-- **Resumable TUS upload** — uploads use Supabase’s TUS endpoint (`*.storage.supabase.co/storage/v1/upload/resumable`) with **6 MiB chunks** (Supabase requirement) and a persistent fingerprint store so interrupted uploads **resume from the last confirmed offset** instead of restarting from byte 0. Falls back to a single streaming `POST` if TUS is unavailable (404/405/501).
-- **Streaming download** — files are downloaded chunk-by-chunk and written directly to a temp file on disk. No in-memory accumulation. Handles `-1` content length (chunked transfer encoding) gracefully.
-- **SHA-256 integrity** — computed before upload using chunked `file.openRead()` (constant memory). After download, the hash is recomputed and compared. Mismatches are surfaced in the UI with clear error messages.
-- **Per-file + aggregate progress** — sender sees individual progress bars (hashing %, uploading %) and an aggregate counter. Receiver sees per-file download progress.
-- **Automatic retry** — TUS client performs many internal resume/retry cycles; the UI still shows an outer attempt counter for rare hard failures (up to 3 outer passes).
-- **File size validation** — rejects files exceeding the configured limit (default 1GB) before upload begins.
-- **File name sanitization** — strips path traversal characters (`..`, `<>`, pipe, wildcards) before constructing storage paths.
-- **Collision-safe temp files** — downloads use timestamped random prefixes to prevent overwriting when multiple files share the same name.
-- **Persistent duplicate delivery prevention** — downloaded file IDs are persisted to `SharedPreferences` keyed by transfer ID. Even after app restart, already-downloaded files show as completed and cannot be re-downloaded.
+- **Recipient-code based send flow** with validation and self-send blocking.
+- **All file types supported** (`FileType.any`) with multi-file transfers (up to 20 files).
+- **Cross-network sharing** via Supabase cloud (not restricted to local Wi-Fi/LAN).
+- **Transfer history and status** for both sent and received flows.
 
-### Auth & Session Management
+### 3) Transfer engine and reliability
 
-- **Auto token refresh** — `SupabaseConfig` listens for `onAuthStateChange` events. Before every API call, `ensureValidSession()` checks token expiry and proactively refreshes if needed.
-- **Session recovery** — if the auth session expires but local identity exists, the app re-authenticates anonymously and restores the cached identity.
-- **Custom exception types** — `AuthFailedException`, `CodeGenerationException`, `AuthenticationException`, `StorageUploadException`, `NoConnectionException` provide clear, actionable error messages instead of generic exceptions.
+- **Resumable uploads (TUS)** with persistent fingerprint/offset resume semantics.
+- **Streaming I/O** for uploads/downloads to avoid loading whole files into memory.
+- **SHA-256 verification** before upload and after download for integrity guarantees.
+- **Progress visibility** per file plus aggregate transfer progress.
+- **Automatic retries** for transient failures with bounded outer retry attempts.
+- **Safety checks** for file-size limits, duplicate additions, and filename sanitization.
 
-### Real-time
+### 4) Real-time and notifications
 
-- **Supabase Realtime subscription** — the receive screen subscribes to Postgres CDC on the `transfers` table (both `INSERT` and `UPDATE` events), filtered by `receiver_id`. This ensures the receiver is notified both when a transfer is created AND when files finish uploading (status changes to `completed`).
-- **Smart notifications** — different SnackBar messages for new incoming transfer vs. files-ready-to-download.
-- **Connection indicator** — the empty state shows whether the Realtime channel is active.
+- **Realtime transfer updates** through Postgres CDC subscription on `transfers`.
+- **Push notifications (FCM)** for incoming transfer awareness while app is backgrounded/closed.
+- **Deep-link-ready payload contract** using transfer metadata (`transfer_id`, `sender_code`).
 
-### Error Handling
+### 5) Offline behavior and resilience
+
+- **Connectivity awareness** with pre-flight network checks and online/offline status indicators.
+- **Deferred backend job queue** for operations that fail while offline.
+- **When-online sync coordinator** to replay pending jobs (FCM sync + edge function retries).
+- **Persistent duplicate-delivery prevention** for already downloaded file records.
+
+### 6) Error handling and UX safety
+
+- Domain-specific exceptions and user-facing actionable messages.
+- Defensive handling for auth failures, network drops, integrity mismatches, and permission issues.
+- Expiration-aware rendering for stale/expired transfers.
+
+### Error handling matrix
 
 | Scenario | Behavior |
 |----------|----------|
@@ -313,27 +349,6 @@ flutter test
 | API keys | The `supabase_anon_key` is a **public/anonymous key** (not a service role key). Data security is enforced via RLS on the server. |
 | Duplicate delivery | Transfer file IDs persisted to `SharedPreferences` — survives app restarts. |
 
-## Delivery Semantics (Explicit)
-
-- **Recipient offline:** accepted. Upload succeeds to cloud relay, recipient can download later.
-- **Transfer TTL:** 24 hours (`AppConstants.transferTtlHours`). Expired transfers are hidden/marked expired.
-- **Invalid recipient code:** rejected before upload starts with an inline error.
-- **Network drop mid-upload:** uploads use **Supabase TUS** (chunked, resumable). Transient failures retry within the TUS session; outer attempts still cap at 3 for catastrophic errors. If all attempts fail, the file is marked failed with actionable error text.
-- **Upload/download cancel:** user can cancel in-progress operations from UI.
-- **Storage pressure:** receiver checks free disk space before download; if insufficient, download is blocked with a clear message.
-- **Incoming while app closed:** FCM + local notifications (foreground + background/terminated data messages) and tap-to-open navigation to `ReceiveScreen` when `transfer_id` is present. Requires real Firebase project files + deployed `send-transfer-fcm` webhook.
-- **Closed-app delivery readiness gate:** before upload starts, sender runs a push `dry_run` health check (recipient token + function readiness). If not ready, send is blocked with an actionable message instead of silently delivering without closed-app notification.
-
-## Known Limitations
-
-| Area | Limitation | Path to Fix |
-|------|-----------|-------------|
-| Push delivery | Deploy `send-transfer-fcm`, set `FCM_*` secrets; client calls the function after upload (no INSERT webhook). Placeholder `google-services.json` must be replaced for real FCM. | Follow §5b |
-| Background transfers | Transfers run in the foreground. App kill = failed transfer. | Add `flutter_background_service` or `workmanager` |
-| Supabase Storage limits | Free tier: 50MB/file, 1GB total. Pro plan: 5GB/file. | Upgrade Supabase plan or implement chunked/tus uploads |
-| Platform channels | Native share sheet implemented with `MethodChannel` (`zensend/native_share`) for Android and iOS. | Extend with native file picker (Pigeon) or MediaStore save channel |
-| Server-side TTL | TTL is enforced client-side only (24h cutoff in query). | Add Supabase cron/Edge Function to delete expired files |
-| Certificate pinning | Not implemented — relies on OS trust store. | Add `badCertificateCallback` to HttpClient for production |
 
 ## Testing
 

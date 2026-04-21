@@ -77,6 +77,9 @@ class PendingUploadJob {
   final String senderId;
   final String receiverId;
   final String? receiverCode;
+  /// Server `transfers.id` for this interrupted send; persisted so resume never
+  /// creates a second row for the same pending job.
+  final String? transferId;
   final List<PendingUploadFile> files;
   final DateTime createdAt;
 
@@ -86,6 +89,7 @@ class PendingUploadJob {
     required this.files,
     required this.createdAt,
     this.receiverCode,
+    this.transferId,
   });
 
   List<PlatformFile> toPlatformFiles() {
@@ -100,13 +104,17 @@ class PendingUploadJob {
         .toList();
   }
 
-  Map<String, dynamic> toJson() => {
-        'sender_id': senderId,
-        'receiver_id': receiverId,
-        'receiver_code': receiverCode,
-        'created_at': createdAt.toIso8601String(),
-        'files': files.map((f) => f.toJson()).toList(),
-      };
+  Map<String, dynamic> toJson() {
+    final tid = transferId?.trim();
+    return {
+      'sender_id': senderId,
+      'receiver_id': receiverId,
+      'receiver_code': receiverCode,
+      if (tid != null && tid.isNotEmpty) 'transfer_id': tid,
+      'created_at': createdAt.toIso8601String(),
+      'files': files.map((f) => f.toJson()).toList(),
+    };
+  }
 
   static PendingUploadJob? fromJson(Map<String, dynamic> json) {
     final filesRaw = json['files'];
@@ -122,10 +130,14 @@ class PendingUploadJob {
     final receiverId = (json['receiver_id'] ?? '').toString();
     if (senderId.isEmpty || receiverId.isEmpty) return null;
 
+    final tidRaw = (json['transfer_id']?.toString() ?? '').trim();
+    final transferId = tidRaw.isNotEmpty ? tidRaw : null;
+
     return PendingUploadJob(
       senderId: senderId,
       receiverId: receiverId,
       receiverCode: (json['receiver_code'] as String?)?.trim(),
+      transferId: transferId,
       createdAt: DateTime.tryParse((json['created_at'] ?? '').toString()) ??
           DateTime.now().toUtc(),
       files: files,
@@ -555,6 +567,72 @@ class TransferService {
     }
   }
 
+  static String _receiverCodeKey(String? code) {
+    final t = (code ?? '').trim();
+    if (t.isEmpty) return '';
+    return AppConstants.normalizeShortCode(t);
+  }
+
+  static bool _pendingJobMatchesSend(
+    PendingUploadJob? pending, {
+    required String receiverId,
+    required String? receiverCode,
+    required List<PlatformFile> validFiles,
+  }) {
+    if (pending == null) return false;
+    if (pending.receiverId != receiverId) return false;
+    if (_receiverCodeKey(pending.receiverCode) !=
+        _receiverCodeKey(receiverCode)) {
+      return false;
+    }
+    if (pending.files.length != validFiles.length) return false;
+    for (var i = 0; i < validFiles.length; i++) {
+      final a = pending.files[i];
+      final b = validFiles[i];
+      if (a.name != b.name || a.size != b.size || a.path != b.path) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// Eligible rows already in `transfer_files` for this transfer, keyed by
+  /// `file_name` (sanitized), or `null` if this transfer must not be resumed.
+  static Future<Map<String, Map<String, dynamic>>?> _loadTransferResumeSnapshot({
+    required SupabaseClient client,
+    required String transferId,
+    required String senderId,
+    required String receiverId,
+  }) async {
+    final transfer = await client
+        .from('transfers')
+        .select('sender_id,receiver_id,status')
+        .eq('id', transferId)
+        .maybeSingle();
+    if (transfer == null) return null;
+    if (transfer['sender_id']?.toString() != senderId) return null;
+    if (transfer['receiver_id']?.toString() != receiverId) return null;
+    final st = (transfer['status'] ?? '').toString().toLowerCase();
+    if (st == 'completed' || st == 'expired') return null;
+
+    final rows =
+        await client.from('transfer_files').select().eq('transfer_id', transferId);
+    final out = <String, Map<String, dynamic>>{};
+    for (final raw in rows) {
+      final m = Map<String, dynamic>.from(raw);
+      final fn = (m['file_name'] ?? '').toString();
+      if (fn.isNotEmpty) out[fn] = m;
+    }
+    return out;
+  }
+
+  static Future<void> _abandonOrphanTransfer(
+    SupabaseClient client,
+    String transferId,
+  ) async {
+    await _safeUpdateTransferStatus(client, transferId, 'failed');
+  }
+
   // ── Send files ───────────────────────────────────────────────────────────
 
   static Future<TransferResult> sendFiles({
@@ -565,9 +643,6 @@ class TransferService {
     TransferCancellationToken? cancellationToken,
     String? receiverCode,
   }) async {
-    await SupabaseConfig.ensureValidSession();
-    final client = SupabaseConfig.client;
-
     for (final file in files) {
       if (file.size > AppConstants.maxFileSizeBytes) {
         throw FileTooLargeException(file.name, file.size);
@@ -577,42 +652,138 @@ class TransferService {
       throw TooManyFilesException(files.length);
     }
     final validFiles = files.where((f) => f.path != null).toList();
+
+    final existingPending = await getPendingUploadJob(senderId: senderId);
+    final matches = _pendingJobMatchesSend(
+      existingPending,
+      receiverId: receiverId,
+      receiverCode: receiverCode,
+      validFiles: validFiles,
+    );
+
+    final pendingTid = existingPending?.transferId?.trim();
+    final orphanTid = (!matches &&
+            pendingTid != null &&
+            pendingTid.isNotEmpty)
+        ? pendingTid
+        : null;
+
+    await SupabaseConfig.ensureValidSession();
+    final client = SupabaseConfig.client;
+
+    if (orphanTid != null) {
+      await _abandonOrphanTransfer(client, orphanTid);
+    }
+
+    final createdAtBase = (matches && existingPending != null)
+        ? existingPending.createdAt
+        : DateTime.now().toUtc();
+    final earlyTid =
+        matches && pendingTid != null && pendingTid.isNotEmpty ? pendingTid : null;
+
     await _storePendingUploadJob(
       senderId: senderId,
       receiverId: receiverId,
       receiverCode: receiverCode,
       files: validFiles,
+      transferId: earlyTid,
+      createdAt: createdAtBase,
+    );
+
+    late final String transferId;
+    Map<String, Map<String, dynamic>> resumeByFileName = {};
+
+    if (matches &&
+        existingPending?.transferId != null &&
+        existingPending!.transferId!.trim().isNotEmpty) {
+      final tid = existingPending.transferId!.trim();
+      final snap = await _loadTransferResumeSnapshot(
+        client: client,
+        transferId: tid,
+        senderId: senderId,
+        receiverId: receiverId,
+      );
+      if (snap != null) {
+        transferId = tid;
+        resumeByFileName = snap;
+      } else {
+        await _abandonOrphanTransfer(client, tid);
+        final transfer = await client
+            .from('transfers')
+            .insert({
+              'sender_id': senderId,
+              'receiver_id': receiverId,
+              'status': 'pending',
+            })
+            .select()
+            .single();
+        transferId = transfer['id'] as String;
+      }
+    } else {
+      final transfer = await client
+          .from('transfers')
+          .insert({
+            'sender_id': senderId,
+            'receiver_id': receiverId,
+            'status': 'pending',
+          })
+          .select()
+          .single();
+      transferId = transfer['id'] as String;
+    }
+
+    await _storePendingUploadJob(
+      senderId: senderId,
+      receiverId: receiverId,
+      receiverCode: receiverCode,
+      files: validFiles,
+      transferId: transferId,
+      createdAt: createdAtBase,
     );
 
     var states = files
         .map((f) => FileUploadProgress(fileName: f.name, fileSize: f.size))
         .toList();
+
+    for (var i = 0; i < files.length; i++) {
+      final safeName = sanitizeFileName(files[i].name);
+      final row = resumeByFileName[safeName];
+      if (row != null) {
+        final sha = row['sha256_hash']?.toString();
+        states = _updateState(
+          states,
+          i,
+          states[i].copyWith(
+            status: FileUploadStatus.completed,
+            progress: 1.0,
+            sha256: (sha != null && sha.isNotEmpty) ? sha : states[i].sha256,
+          ),
+        );
+      }
+    }
+
+    var completedCount =
+        states.where((s) => s.status == FileUploadStatus.completed).length;
+
     onProgress(states);
 
-    final transfer = await client
-        .from('transfers')
-        .insert({
-          'sender_id': senderId,
-          'receiver_id': receiverId,
-          'status': 'pending',
-        })
-        .select()
-        .single();
-
-    final transferId = transfer['id'] as String;
     final progressBroadcaster = _TransferProgressBroadcaster(client, transferId);
     void report(List<FileUploadProgress> s) {
       onProgress(s);
       progressBroadcaster.notify(s);
     }
 
-    var completedCount = 0;
-
     try {
       for (var i = 0; i < files.length; i++) {
         if (cancellationToken?.isCancelled == true) {
           throw TransferCancelledException();
         }
+
+        if (states[i].status == FileUploadStatus.completed) {
+          report(states);
+          continue;
+        }
+
         final file = files[i];
         final filePath = file.path;
 
@@ -803,6 +974,10 @@ class TransferService {
     required String receiverId,
     required List<PlatformFile> files,
     String? receiverCode,
+    /// When null, job is still "in flight" before a `transfers` row exists; used
+    /// so a process kill still leaves enough state to offer resume/discards UI.
+    String? transferId,
+    DateTime? createdAt,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final serializableFiles = files
@@ -817,11 +992,13 @@ class TransferService {
         .toList();
     if (serializableFiles.isEmpty) return;
 
+    final tid = transferId?.trim();
     final job = PendingUploadJob(
       senderId: senderId,
       receiverId: receiverId,
       receiverCode: receiverCode,
-      createdAt: DateTime.now().toUtc(),
+      transferId: (tid != null && tid.isNotEmpty) ? tid : null,
+      createdAt: createdAt ?? DateTime.now().toUtc(),
       files: serializableFiles,
     );
     await prefs.setString(_pendingUploadKey, jsonEncode(job.toJson()));
@@ -848,6 +1025,22 @@ class TransferService {
   static Future<void> clearPendingUploadJob() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_pendingUploadKey);
+  }
+
+  /// Clears local pending send state and marks the server transfer as failed so
+  /// a discarded or obsolete job cannot leave a dangling `pending` transfer.
+  static Future<void> discardPendingUploadJob({
+    required String senderId,
+  }) async {
+    final job = await getPendingUploadJob(senderId: senderId);
+    final tid = job?.transferId?.trim();
+    if (tid != null && tid.isNotEmpty) {
+      try {
+        await SupabaseConfig.ensureValidSession();
+        await _abandonOrphanTransfer(SupabaseConfig.client, tid);
+      } catch (_) {}
+    }
+    await clearPendingUploadJob();
   }
 
   /// Updates the transfer status, handling the case where `status` is a

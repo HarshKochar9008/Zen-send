@@ -204,7 +204,7 @@ class _ReceiveScreenState extends State<ReceiveScreen>
   }
 
   Future<bool> _confirmPowerSaveIfNeeded(int fileSize) async {
-    if (fileSize < AppConstants.cellularWarnThresholdBytes) return true;
+    if (fileSize < AppConstants.largeUploadWarnThresholdBytes) return true;
     final powerSave = await _isPowerSaveModeEnabled();
     if (!powerSave || !mounted) return true;
 

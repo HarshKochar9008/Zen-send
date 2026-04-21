@@ -40,7 +40,12 @@ class AppConstants {
   // File limits
   static const maxFileSizeBytes = 100 * 1024 * 1024; // 100 MB
   static const maxFilesPerTransfer = 20;
-  static const cellularWarnThresholdBytes = 100 * 1024 * 1024; // 100 MB
+
+  /// Wi‑Fi / non‑cellular: confirm “large upload” when total size is at or above this.
+  static const largeUploadWarnThresholdBytes = 10 * 1024 * 1024; // 10 MB
+
+  /// [ConnectivityResult.mobile]: confirm sooner so non‑trivial uploads are not silent on metered data.
+  static const cellularMeteredWarnThresholdBytes = 5 * 1024 * 1024; // 5 MB
 
   // Transfer TTL
   static const transferTtlHours = 24;
